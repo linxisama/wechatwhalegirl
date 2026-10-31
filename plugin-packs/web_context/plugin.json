@@ -1,0 +1,17 @@
+{
+  "id": "web_context",
+  "name": "联网资讯（时间/新闻/热搜）",
+  "version": "1.0.0",
+  "entry": "plugin.py",
+  "author": "鲸鱼娘",
+  "description": "把当前时间、今日要闻和网络热梗（微博/抖音热榜）带进回复；只读公开接口、后台轮询并缓存，失败不编造，外部内容标注为\"仅作参考\"",
+  "api_version": "1",
+  "requires": "1.3.0",
+  "data_policy": "只在本机读写插件自己的设置与状态，不上传聊天内容",
+  "native": "纯 Python，不依赖外部程序",
+  "side": "本机侧运行",
+  "upstream": "随控制台源码分发（plugin-packs 种子包）",
+  "capabilities": [
+    "on_pre_ai"
+  ]
+}

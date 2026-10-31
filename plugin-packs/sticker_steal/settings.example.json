@@ -1,0 +1,9 @@
+{
+  "enabled": true,
+  "watchImages": false,
+  "stickerOnly": true,
+  "allowPrivate": false,
+  "blockedSenders": "",
+  "maxLibrarySize": 800,
+  "maxLibraryMb": 96
+}

@@ -1,0 +1,17 @@
+{
+  "id": "reply_pace",
+  "name": "回复节奏（别秒回）",
+  "version": "1.0.0",
+  "entry": "plugin.py",
+  "author": "鲸鱼娘",
+  "description": "回复节奏：开口前随机等几秒，降低「秒回」特征。",
+  "api_version": "1",
+  "requires": "1.3.0",
+  "data_policy": "只在本机读写插件自己的设置与状态，不上传聊天内容",
+  "native": "纯 Python，不依赖外部程序",
+  "side": "本机侧运行",
+  "upstream": "随控制台源码分发（plugin-packs 种子包）",
+  "capabilities": [
+    "on_pre_ai"
+  ]
+}

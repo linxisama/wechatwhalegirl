@@ -1,0 +1,13 @@
+# 本项目混用行尾：src/*.py 是 LF，多数 .md/.ps1/.bat 是 CRLF，部分文档是 LF。
+# 让 git 做任何自动换行转换都会改变字节（文档里有按字节校验的测试），
+# 所以整体关闭文本转换：提交与检出都保持文件原始字节。
+* -text
+*.exe binary
+*.dll binary
+*.pyd binary
+*.png binary
+*.jpg binary
+*.ico binary
+*.db binary
+*.zip binary
+*.pdf binary

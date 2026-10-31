@@ -1,0 +1,117 @@
+# 鲸鱼娘 · 微信控制台 配置文件
+# 保存后密钥会用 Fernet 加密写进 *_encrypted 字段（本机自用级别的保护，不是强加密）。
+# 也可以完全不手改这个文件：打开控制台的「设置」页填写并保存即可。
+
+ai:
+  # 模型服务地址（OpenAI 兼容或 Anthropic Messages 都可以，接口格式在下面选）
+  api_url: ''
+  api_key: ''
+  api_key_encrypted: ''
+  api_style: auto          # auto / openai / anthropic
+  model: deepseek-chat
+  max_tokens: 500
+  temperature: 0.55
+  timeout: 20
+  max_retries: 2
+
+wechat:
+  # auto = 按运行的微信客户端自动挑；也可固定 wechatauto / wxauto4 / wxauto / mock
+  # 微信 4.1.12+ 用 wechatauto；模拟模式（mock）不连微信，只用于验证界面
+  backend: auto
+  # 微信 4.x 数据目录；留空自动探测。探测失败时手填，例如：
+  #   C:\Users\你的用户名\Documents\xwechat_files
+  db_dir: ''
+  auto_start: false
+  # 要回复的群：填群名（与微信里显示一致）或 xxx@chatroom；留空表示所有群
+  target_groups: []
+  # 是否回复单聊
+  listen_private: false
+  # 两条消息之间的最小间隔（秒）。这是给微信风控留的余量，不建议低于 1。
+  send_interval: 1.5
+  # 超过这个秒数的消息不再回复（避免"迟到回复"打扰人）
+  max_message_age: 25
+  # 同一波连环消息合并窗口（秒）；0 = 关闭，逐条回复
+  burst_settle_seconds: 3.0
+  dedupe_window: 21600
+  context_file: ./data/wechat_contexts.json
+  answered_cache_file: ./data/wechat_answered.json
+  # 命中这些词时机器人会在群里开口（前提是群在白名单里）
+  trigger_keywords:
+    - 大肥鲸
+    - deepseek
+    - 鲸鱼娘
+    - 小深
+    - 蓝鲸酱
+    - 小鲸鱼
+    - 出来
+    - 在不在
+    - 在干嘛
+    - 冒个泡
+    - 吃大米
+    - 开饭了
+    - 大米饭
+    - 投喂
+    - 帮帮我
+    - 别摸鱼
+    - 写代码
+    - 干活了
+    - 摸尾巴
+    - 摸摸头
+    - 拍水花
+    - 变胖了
+    - 该减肥
+    - 好圆啊
+    - 咕嘟嘟
+  # 主动发言：默认**关闭**。微信群聊里"没人说话时机器人先开口"是被风控关注的行为，
+  # 打开前请先看《封号风险与功能取舍.md》。
+  proactive:
+    enabled: false
+    interval_hours: 2
+    start_hour: 8
+    end_hour: 20
+    groups: []
+    idle:
+      enabled: false
+      idle_minutes: 45
+      cooldown_minutes: 120
+      check_interval: 60
+      min_messages: 0
+  # 每 N 次成功回复后可以附一张图库里的表情（图库在插件中心配置）
+  sticker:
+    enabled: true
+    reply_interval: 3
+
+# 控制台「设置」页保存的字段（与 wechat 段同步写入）
+wechat_only:
+  backend: auto
+  db_dir: ''
+  groups: []
+  listen_private: false
+  send_interval: 1.5
+  auto_start: false
+
+# 本地语音识别：收到的语音先转文字，再按文字内容决定要不要回；语音不上传第三方。
+asr:
+  enabled: true
+  model: base
+  model_dir: ./data/models/faster-whisper
+  cache_dir: ./data/voice_inbox
+  language: zh
+  compute_type: int8
+  cpu_threads: 4
+  beam_size: 1
+  max_audio_mb: 20.0
+  hf_endpoint: https://hf-mirror.com
+
+# 本地读图：用 Windows 自带 OCR 读出图片里的文字；图片不出本机。
+image_reader:
+  enabled: true
+  ocr_timeout: 20.0
+  max_image_mb: 12.0
+  max_chars: 800
+
+style:
+  active: tsundere_whale_girl
+  locked: false
+  locked_name: null
+  custom_styles_dir: ./styles/custom/

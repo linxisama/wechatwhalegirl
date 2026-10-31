@@ -1,0 +1,10 @@
+{
+  "enabled": true,
+  "includeTime": true,
+  "newsCount": 5,
+  "hotCount": 5,
+  "hotSource": "weibo",
+  "refreshMinutes": 30,
+  "timeoutSec": 8,
+  "verbose": false
+}

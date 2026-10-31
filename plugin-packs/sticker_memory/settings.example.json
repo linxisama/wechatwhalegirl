@@ -1,0 +1,8 @@
+{
+  "enabled": true,
+  "stickerOnly": true,
+  "maxCacheEntries": 2000,
+  "recheckSameChatHours": 24.0,
+  "recheckCrossChatDays": 7.0,
+  "skipThreshold": 0.5
+}

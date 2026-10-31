@@ -1,0 +1,13 @@
+{
+  "intimacyEnabled": false,
+  "intimacyDays": 7,
+  "intimacyMin": 30,
+  "enabled": false,
+  "intervalMin": 30,
+  "echoEnabled": false,
+  "echoIntervalMin": 10,
+  "maxPerHour": 3,
+  "activeWithinMin": 20,
+  "quietHours": "23-8",
+  "echoMaxChars": 60
+}

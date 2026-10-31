@@ -1,0 +1,6 @@
+{
+  "enabled": true,
+  "hours": 24,
+  "maxMessages": 500,
+  "maxChars": 14000
+}

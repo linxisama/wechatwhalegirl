@@ -1,0 +1,6 @@
+{
+  "enabled": false,
+  "minDelay": 2,
+  "maxDelay": 6,
+  "longTextExtra": 1
+}

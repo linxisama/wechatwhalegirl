@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>鲸鱼娘 · 微信控制台</title>
+<style>
+  :root { --bg:#f4f6f9; --card:#fff; --border:#d3dae3; --text:#1f2733; --muted:#5f6b7a;
+          --accent:#2fa8a0; --accent2:#248780; --danger:#c0392b; --ok:#1e8e5a; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--text);
+         font-family:"Microsoft YaHei","Segoe UI",sans-serif; font-size:14px; }
+  header { padding:18px 24px; background:var(--card); border-bottom:1px solid var(--border); }
+  h1 { margin:0; font-size:18px; }
+  header p { margin:6px 0 0; color:var(--muted); font-size:12px; }
+  main { padding:20px 24px 48px; max-width:1100px; margin:0 auto; }
+  .grid { display:grid; gap:16px; grid-template-columns:repeat(auto-fit,minmax(320px,1fr)); }
+  .card { background:var(--card); border:1px solid var(--border); border-radius:12px; padding:16px; }
+  .card h2 { margin:0 0 12px; font-size:15px; }
+  .row { display:flex; gap:10px; align-items:center; margin-bottom:10px; flex-wrap:wrap; }
+  label { color:var(--muted); min-width:96px; font-size:13px; }
+  input[type=text], input[type=password], textarea, select {
+    flex:1; min-width:180px; padding:8px; border:1px solid var(--border);
+    border-radius:7px; background:#fff; color:var(--text); font-family:inherit; font-size:13px; }
+  textarea { min-height:84px; resize:vertical; }
+  button { background:var(--accent); color:#fff; border:0; border-radius:7px;
+           padding:8px 14px; font-weight:bold; cursor:pointer; font-size:13px; }
+  button:hover { background:#37bdb4; }
+  button.secondary { background:#e8edf3; color:var(--text); border:1px solid var(--border); }
+  button.danger { background:var(--danger); }
+  .status { display:flex; justify-content:space-between; padding:6px 0;
+            border-bottom:1px dashed var(--border); font-size:13px; }
+  .status:last-child { border-bottom:0; }
+  .value { font-weight:bold; }
+  .ok { color:var(--ok); } .bad { color:var(--danger); }
+  pre { background:#0f1720; color:#d7e3ee; padding:12px; border-radius:8px;
+        font-size:12px; max-height:340px; overflow:auto; white-space:pre-wrap; }
+  .hint { color:var(--muted); font-size:12px; margin:-4px 0 10px; }
+  .notice { margin-top:10px; font-size:13px; min-height:20px; }
+  table { width:100%; border-collapse:collapse; font-size:12px; }
+  th, td { text-align:left; padding:6px 8px; border-bottom:1px solid var(--border); }
+  th { color:var(--muted); font-weight:normal; }
+</style>
+</head>
+<body>
+<header>
+  <h1>鲸鱼娘 · 微信控制台</h1>
+  <p>本页只在本机可用。日常使用建议打开原生控制台（<code>wechat_gui.py</code>），这里是没有 GUI 环境时的备用入口。</p>
+</header>
+<main>
+  <div class="grid">
+    <section class="card">
+      <h2>运行状态</h2>
+      <div class="status"><span>机器人服务</span><span class="value" id="s-running">-</span></div>
+      <div class="status"><span>微信接入</span><span class="value" id="s-wechat">-</span></div>
+      <div class="status"><span>后端 / 账号</span><span class="value" id="s-account">-</span></div>
+      <div class="status"><span>收发统计</span><span class="value" id="s-count">-</span></div>
+      <div class="status"><span>模型 / API</span><span class="value" id="s-model">-</span></div>
+      <div class="status"><span>插件数量</span><span class="value" id="s-plugins">-</span></div>
+      <div class="row" style="margin-top:14px">
+        <button id="btn-start">▶ 启动机器人</button>
+        <button id="btn-stop" class="secondary">■ 停止</button>
+        <button id="btn-test-ai" class="secondary">测试 AI</button>
+        <button id="btn-test-wechat" class="secondary">测试微信</button>
+      </div>
+      <div class="notice" id="notice"></div>
+    </section>
+
+    <section class="card">
+      <h2>配置</h2>
+      <div class="row"><label>微信后端</label>
+        <select id="backend">
+          <option value="auto">自动选择（推荐）</option>
+          <option value="wechatauto">wechatauto · 微信 4.1.12+</option>
+          <option value="wxauto4">wxauto4 · 微信 4.0.x</option>
+          <option value="wxauto">wxauto · 微信 3.9.x</option>
+          <option value="mock">模拟模式（不连微信）</option>
+        </select>
+      </div>
+      <div class="row"><label>微信数据库目录</label>
+        <input type="text" id="db_dir" placeholder="留空=自动探测">
+      </div>
+      <div class="row"><label>回复群列表</label>
+        <textarea id="groups" placeholder="每行一个群名（与微信显示一致），留空=所有群"></textarea>
+      </div>
+      <div class="row"><label>回复私聊</label>
+        <input type="checkbox" id="listen_private" checked>
+      </div>
+      <div class="row"><label>API 地址</label><input type="text" id="api_url" placeholder="https://你的服务地址/v1/chat/completions"></div>
+      <div class="row"><label>API Key</label><input type="password" id="api_key" placeholder="留空保留已保存值"></div>
+      <div class="row"><label>模型名称</label><input type="text" id="model" placeholder="deepseek-chat"></div>
+      <div class="row"><label>接口格式</label>
+        <select id="api_style">
+          <option value="auto">自动识别</option>
+          <option value="openai">OpenAI 兼容</option>
+          <option value="anthropic">Anthropic Messages</option>
+        </select>
+      </div>
+      <div class="row"><button id="btn-save">保存配置</button>
+        <button id="btn-groups" class="secondary">读取微信群列表</button></div>
+      <p class="hint">wechatauto 需要微信 4.1.12 及以上，并建议以管理员身份运行；模拟模式不会发送任何消息。</p>
+    </section>
+  </div>
+
+  <section class="card" style="margin-top:16px">
+    <h2>消息与回复</h2>
+    <table>
+      <thead><tr><th>时间</th><th>会话</th><th>发送者</th><th>消息</th><th>回复</th><th>状态</th></tr></thead>
+      <tbody id="messages"><tr><td colspan="6">-</td></tr></tbody>
+    </table>
+  </section>
+
+  <section class="card" style="margin-top:16px">
+    <h2>运行记录</h2>
+    <pre id="events">-</pre>
+  </section>
+</main>
+<script src="/wechat.js"></script>
+</body>
+</html>

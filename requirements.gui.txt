@@ -1,0 +1,3 @@
+# 只装原生控制台需要的两个包（后端依赖见 requirements.wechat.txt）
+PyQt6>=6.6.0
+requests>=2.31.0

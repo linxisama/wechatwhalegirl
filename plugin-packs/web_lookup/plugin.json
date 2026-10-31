@@ -1,0 +1,18 @@
+{
+  "id": "web_lookup",
+  "name": "联网现查（搜一下/最新…）",
+  "version": "1.0.0",
+  "entry": "plugin.py",
+  "author": "鲸鱼娘",
+  "description": "消息里出现\"搜一下/查一下/最新\"等词时，现场查公开搜索页并带上几条结果；硬超时、失败不编造、结果标注仅作参考。只在命中触发词时联网。",
+  "api_version": "1",
+  "requires": "1.3.0",
+  "data_policy": "只在本机读写插件自己的设置与状态，不上传聊天内容",
+  "native": "纯 Python，不依赖外部程序",
+  "side": "本机侧运行",
+  "upstream": "随控制台源码分发（plugin-packs 种子包）",
+  "capabilities": [
+    "on_pre_ai",
+    "on_prepare"
+  ]
+}
