@@ -2481,7 +2481,19 @@ def _runtime_proxy(app):
     return _Proxy()
 
 
+_GUARD_NAMES_TTL = 60.0
+_GUARD_NAMES_TIMEOUT = 3.0
+_guard_names_cache = {'key': '', 'at': 0.0, 'rows': {}}
+
+
+def _reset_guard_names_cache() -> None:
+    """清掉账号昵称缓存（每个 app 一份现场，测试之间也不串味）。"""
+    _guard_names_cache.update({'key': '', 'at': 0.0, 'rows': {}})
+
+
 def create_app(runtime=None):
+    _reset_guard_names_cache()
+
     @asynccontextmanager
     async def lifespan(app):
         app.state.bot = runtime or WeChatRuntime()
@@ -2832,6 +2844,30 @@ def create_app(runtime=None):
                 "path_account": path_account(directory),
                 "accounts": rows}
 
+    async def _guard_account_names(directory: str) -> dict:
+        """读账号昵称表；目录为空直接返回空表。
+
+        为什么要有这个包装：「自动探测目录」那个侧分支要扫盘并逐个开库做密钥扫描，
+        本机实测 8.8 秒，账号守卫对话框会一直转圈。目录为空时宁可显示「未知」，
+        也不做这种猜测；成功结果按目录缓存 _GUARD_NAMES_TTL 秒，连点不重复扫。
+        """
+        from .wechat_bridge import describe_accounts
+
+        if not directory:
+            return {}
+        now = time.monotonic()
+        cached_at = float(_guard_names_cache.get('at') or 0.0)
+        if _guard_names_cache.get('key') == directory and now - cached_at < _GUARD_NAMES_TTL:
+            return dict(_guard_names_cache.get('rows') or {})
+        try:
+            rows = await asyncio.wait_for(
+                asyncio.to_thread(describe_accounts, directory), _GUARD_NAMES_TIMEOUT)
+        except Exception:
+            return {}
+        table = {str(row.get('account') or ''): str(row.get('name') or '') for row in rows or []}
+        _guard_names_cache.update({'key': directory, 'at': now, 'rows': table})
+        return dict(table)
+
     async def _account_guard_state():
         """读一次账号现场：配置的机器人账号、微信当前登录的账号、两者关系。
 
@@ -2839,23 +2875,19 @@ def create_app(runtime=None):
         用的账号目录。都读不到就如实报 unknown，不猜。
         """
         from .account_guard import judge
-        from .wechat_bridge import active_database_account, describe_accounts
+        from .wechat_bridge import active_database_account
         bot = app.state.bot
         conn = bot.bridge.status()
         configured = str(bot.config.get("wechat_only.account", "") or "")
-        directory = str(getattr(bot.bridge, "_db_dir_hint", "") or bot.bridge.db_dir or "")
+        directory = str(getattr(bot.bridge, "_db_dir_hint", "") or bot.bridge.db_dir
+                        or conn.get("account_dir") or "")
         try:
             logged_in = await asyncio.to_thread(active_database_account, directory)
         except Exception:
             logged_in = ""
         if not logged_in:
             logged_in = str(conn.get("account_dir") or "")
-        names = {}
-        try:
-            rows = await asyncio.to_thread(describe_accounts, directory)
-            names = {str(row.get("account") or ""): str(row.get("name") or "") for row in rows}
-        except Exception:
-            names = {}
+        names = await _guard_account_names(directory)
         state = judge(configured, logged_in, names.get(configured, ""), names.get(logged_in, ""))
         state.update({
             "success": True,
