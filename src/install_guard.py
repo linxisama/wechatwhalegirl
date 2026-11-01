@@ -48,6 +48,8 @@ PREV_EXE_NAME = 'WhaleGirlWeChat.prev.exe'
 # 脚本名固定成一个：同名就覆盖，绝不生成第二个不同名字的回滚脚本。
 # 名字也保持 ASCII —— 脚本正文必须全 ASCII，文件名跟着一起干净。
 ROLLBACK_SCRIPT_NAME = 'rollback-prev.cmd'
+# 安装成功时由 installer.iss 写在 {app} 里的标记；退出码不可信，只认它。
+MARKER_NAME = 'install-marker.txt'
 # 生成脚本的二次确认口令：界面必须原样提交，差一个字就不生成。
 ROLLBACK_CONFIRM = '已停止微信发送并愿意重启控制台'
 
@@ -446,6 +448,57 @@ def rollback_state(install_dir=None):
     return state
 
 
+def read_install_marker(install_dir=None):
+    """读安装标记，判断「这个目录到底是安装器装出来的，还是解压出来的」。
+
+    用户实测：/VERYSILENT 下致命错误照样退出码 0，所以「装没装上」不能看退出码。
+    installer.iss 在 ssPostInstall 成功时写 install-marker.txt（version/installed/exe 三行），
+    这里只读它；任何异常都降级成中文说明，绝不抛。
+    """
+    folder = Path(install_dir) if install_dir is not None else _default_install_dir()
+    path = folder / MARKER_NAME
+    state = {'install_dir': str(folder), 'path': str(path), 'exists': False,
+             'version': '', 'installed_at': '', 'note': ''}
+    try:
+        text = path.read_text(encoding='utf-8', errors='replace')
+    except FileNotFoundError:
+        state['note'] = ('这个目录里没有安装标记（{0}）：可能是解压版、老版本装的，'
+                         '也可能上次安装其实没走完。'.format(MARKER_NAME))
+        return state
+    except OSError as error:
+        state['note'] = '安装标记读不出来（{0}）'.format(_error_text(error))
+        return state
+    values = {}
+    for line in text.splitlines():
+        if '=' in line:
+            key, _, value = line.partition('=')
+            values[key.strip().lower()] = value.strip()
+    state['exists'] = True
+    state['version'] = values.get('version', '')
+    state['installed_at'] = values.get('installed', '')
+    if not state['version']:
+        state['note'] = '安装标记里没有版本号，可能被改过'
+        return state
+    state['note'] = '上次安装成功：{0}（{1}）'.format(
+        state['version'], state['installed_at'] or '时间未知')
+    return state
+
+
+def marker_mismatch(install_dir=None, running_version=''):
+    """安装标记与正在运行的版本对不对得上：match / mismatch / missing。"""
+    marker = read_install_marker(install_dir)
+    version = str(running_version or '').strip()
+    if not marker['exists'] or not marker['version']:
+        return {'state': 'missing', 'marker': marker, 'running_version': version,
+                'note': marker['note']}
+    if version and marker['version'] != version:
+        return {'state': 'mismatch', 'marker': marker, 'running_version': version,
+                'note': '安装记录是 {0}，正在运行的是 {1}：这个程序不是从安装目录启动的，'
+                        '或者上次安装没装到当前目录'.format(marker['version'], version)}
+    return {'state': 'match', 'marker': marker, 'running_version': version,
+            'note': marker['note']}
+
+
 def _rollback_script_text(prev_token, current_token, generated=None):
     """回滚脚本正文：命令与提示全 ASCII（cmd 按系统代码页解析，非 ASCII 会变乱码命令）。"""
     lines = [
@@ -759,6 +812,18 @@ def add_routes(app):
         # 只读：安装目录里有没有 .prev.exe、多大、什么时候，决定界面能不能生成回滚脚本。
         require_bound(app.state.bot)
         return await asyncio.to_thread(rollback_state)
+
+    @app.get('/api/install-guard/install-marker')
+    async def install_marker():
+        # 只读：给「到底装没装上」一个不看退出码的判据（1.3.76）。
+        require_bound(app.state.bot)
+        version = ''
+        try:
+            from .runtime_identity import APP_VERSION
+            version = APP_VERSION
+        except Exception:
+            version = ''
+        return await asyncio.to_thread(marker_mismatch, None, version)
 
     @app.post('/api/install-guard/rollback-script')
     async def rollback_script(body: RollbackScriptBody):

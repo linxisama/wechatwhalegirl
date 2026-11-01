@@ -155,11 +155,38 @@ def _sandbox_exe_path():
     return Path(root) / 'System32' / 'WindowsSandbox.exe'
 
 
-def _wsb_exe_exists():
+def _sandbox_app_exists():
     try:
         return _sandbox_exe_path().is_file()
     except OSError:
         return False
+
+
+def _wsb_exe_path():
+    """Windows 沙盒的命令行工具 wsb.exe。
+
+    注意：Windows 10（19045 实测）根本没有 wsb.exe，只有 WindowsSandbox.exe；
+    wsb.exe 是较新版本才带的命令行入口。1.3.75 及以前这里探的是 WindowsSandbox.exe，
+    于是 Windows 10 上面板显示「沙盒已就绪、可以去建通道」，真去建通道却报找不到命令行。
+    """
+    root = os.environ.get('SystemRoot') or r'C:\Windows'
+    return Path(root) / 'System32' / 'wsb.exe'
+
+
+def _wsb_exe_exists():
+    """只认命令行 wsb.exe；有 WindowsSandbox.exe 但没 wsb.exe 的系统算「没有命令行」。"""
+    try:
+        if _wsb_exe_path().is_file():
+            return True
+    except OSError:
+        pass
+    try:
+        local = os.environ.get('LOCALAPPDATA') or ''
+        if local:
+            return (Path(local) / 'Microsoft' / 'WindowsApps' / 'wsb.exe').is_file()
+    except OSError:
+        pass
+    return False
 
 
 def _parse_feature_state(text):
@@ -204,9 +231,19 @@ def _probe_feature(runner):
 
 def _result(state, supported, edition, feature, wsb_exe, needs_reboot, reason, message, hint,
             next_step):
+    # wsb_exe 是命令行工具 wsb.exe（建通道要用）；sandbox_app 是 WindowsSandbox.exe（开窗口要用）。
+    # 两个键分开报，界面才不会在只有 WindowsSandbox.exe 的 Windows 10 上说「已就绪」。
     return {'state': state, 'supported': bool(supported), 'edition': str(edition or ''),
-            'feature': feature, 'wsb_exe': bool(wsb_exe), 'needs_reboot': bool(needs_reboot),
+            'feature': feature, 'wsb_exe': bool(wsb_exe), 'sandbox_app': _sandbox_app_exists(),
+            'needs_reboot': bool(needs_reboot),
             'reason': reason, 'message': message, 'hint': hint, 'next_step': next_step}
+
+
+def _no_cli_hint():
+    return ('自动建隔离通道要调用 wsb.exe，这台机器没有，所以通道功能暂时用不了。'
+            '可以这样继续：① 用本机模式（微信照旧在桌面运行，不隔离，功能完整）；'
+            '② 手动打开 Windows 沙盒、在里面登录微信，再把共享目录当传输通道（控制台不自动接管）；'
+            '③ 换一台 Windows 11 或带 wsb.exe 的机器，点“重新检测”就会变成可建通道。')
 
 
 def _unsupported_hint():
@@ -241,6 +278,13 @@ def _detect(runner, registry_reader, last_record):
     probe = _probe_feature(runner)
     feature = probe['state']
     if feature == 'Enabled':
+        if not wsb_exe:
+            # Windows 10 19045 实测：功能开着、WindowsSandbox.exe 也在，但根本没有 wsb.exe。
+            # 这时不能说「已就绪、去建通道」，否则用户点下去只会看到「找不到命令行」。
+            return _result('no_cli', True, edition, 'Enabled', wsb_exe, needs_reboot, 'no_cli',
+                           _edition_label(edition) + '上 Windows 沙盒功能已启用，'
+                           '但这台机器没有 wsb.exe 命令行工具（Windows 10 只带 WindowsSandbox.exe）',
+                           _no_cli_hint(), 'manual')
         next_step = 'launch'
         message = _edition_label(edition) + '上 Windows 沙盒功能已启用'
         hint = ('功能已生效：先打开 Windows 沙盒并在其中登录微信，再点“创建隔离通道”。'

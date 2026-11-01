@@ -68,6 +68,11 @@ class SandboxProvisionService:
             base.update({'ok': True, 'reason': 'enabled', 'next_step': 'create_channel',
                          'message': text})
             return base
+        if state == 'no_cli':
+            base.update({'ok': False, 'reason': 'no_cli', 'next_step': 'manual',
+                         'message': str(status.get('message') or '')
+                                    + ('；' + str(status.get('hint') or '') if status.get('hint') else '')})
+            return base
         if state in ('disabled', 'absent'):
             base.update({'ok': False, 'reason': 'not_enabled', 'next_step': 'enable',
                          'message': '本机还没启用 Windows 沙盒：点“启用 Windows 沙盒”，'

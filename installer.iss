@@ -13,6 +13,7 @@
   #define AppVersion "1.0.0"
 #endif
 #define AppPublisher "鲸鱼娘"
+#define MarkerName "install-marker.txt"
 
 [Setup]
 AppId={code:GetInstallAppId}
@@ -38,6 +39,13 @@ SetupIconFile=icon.ico
 UninstallDisplayIcon={app}\{#AppExe}
 Compression=lzma2/max
 SolidCompression=yes
+; 1.3.76：Windows 10 19045 上反馈「安装到用户目录时 CreateFile 失败；错误代码 5」，
+; 安装日志里同时出现 RedirectionGuard ... Enabled in enforcing mode。
+; 同一账号用 PowerShell 写同一目录完全正常，说明不是 ACL，而是安装器进程的重定向防护。
+; 关掉 RedirectionGuard 只影响安装器自身进程，不改安装路径与权限模型。
+RedirectionGuard=no
+; 安装过程自动写日志到 %TEMP%\Setup Log *.txt：安装失败时用户能直接把日志发过来。
+SetupLogging=yes
 WizardStyle=modern
 CloseApplications=yes
 RestartApplications=no
@@ -190,6 +198,41 @@ end;
 
 // 覆盖前留一份上一版 exe。已有 .prev.exe 就保留不覆盖：
 // 反复升级时用新 exe 顶掉它，真正的「上一个能用的版本」就丢了。
+// 1.3.76：把「到底装没装成」变成可核对的证据。
+// 用户实测 /VERYSILENT 下致命错误仍然退出码 0，所以控制台/更新器一律不信退出码，
+// 只认安装成功时落下的这个标记文件（安装目录里的 install-marker.txt）。
+procedure WriteInstallMarker;
+var
+  Marker: String;
+  Body: String;
+begin
+  Marker := ExpandConstant('{app}\{#MarkerName}');
+  Body := 'version={#AppVersion}' + CRLF +
+    'installed=' + GetDateTimeString('yyyy-mm-dd hh:nn:ss', '-', ':') + CRLF +
+    'exe=' + ExpandConstant('{app}\{#AppExe}') + CRLF;
+  if SaveStringToFile(Marker, Body, False) then
+    Log('已写入安装标记：' + Marker)
+  else
+    Log('写入安装标记失败（安装本身可能仍然是好的）：' + Marker);
+end;
+
+// 1.3.76：把「错误 5: 拒绝访问」提前成一句人话。
+// 用户现场：普通权限安装 + 系统把写入重定向走，错误在复制阶段才炸，静默安装下
+// 连对话框都被吞掉。这里在复制任何文件之前先试写一个探针文件。
+function InstallDirWritable: Boolean;
+var
+  ProbeDir: String;
+  Probe: String;
+begin
+  ProbeDir := ExpandConstant('{app}');
+  if not DirExists(ProbeDir) then
+    ProbeDir := ExtractFileDir(ProbeDir);
+  Probe := AddBackslash(ProbeDir) + '.whale-write-probe.tmp';
+  Result := SaveStringToFile(Probe, 'probe', False);
+  if Result then
+    DeleteFile(Probe);
+end;
+
 procedure BackupPreviousExe;
 var
   Target: String;
@@ -236,6 +279,16 @@ begin
       '然后回到这个页面点「安装」重试，不需要重新下载。';
     Exit;
   end;
+  if not InstallDirWritable then
+  begin
+    Result := '安装目录写不进去：' + ExpandConstant('{app}') + CRLF + CRLF +
+      '常见原因是系统把写入重定向到了别处（安装日志里会出现 RedirectionGuard），' +
+      '或者这个目录正被别的程序占着。' + CRLF +
+      '可以这样处理：右键安装包 →「以管理员身份运行」；' +
+      '或者在安装向导里换个目录（例如 D:\WhaleGirlWeChat）。' + CRLF + CRLF +
+      '本次没有改动任何文件。';
+    Exit;
+  end;
   // 程序没在跑却仍可能被占用（杀毒软件正在扫描）。这种失败只能靠复制阶段暴露，
   // 所以这里只在日志里留个记号，方便事后判断是安装脚本还是环境问题。
   if not FileExists(Target) then
@@ -246,5 +299,7 @@ end;
 procedure CurStepChanged(CurStep: TSetupStep);
 begin
   if CurStep = ssInstall then
-    BackupPreviousExe;
+    BackupPreviousExe
+  else if CurStep = ssPostInstall then
+    WriteInstallMarker;
 end;

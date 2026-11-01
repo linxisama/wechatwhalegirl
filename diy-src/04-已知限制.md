@@ -1,3 +1,14 @@
+## 1.3.76 按用户《问题日志》修四项：安装器、沙盒口径、学习库自愈、退出码
+
+- 依据：用户在 Windows 10 专业版 19045、1.3.70 上实测提交的《问题日志-2026-11-01》，四项全部复现并定位到代码。
+- P0 安装器「错误 5: 拒绝访问」：安装日志里 RedirectionGuard status for current process: Enabled in enforcing mode，而同一账号用 PowerShell 写同一目录完全正常 → 不是 ACL，是安装器进程被系统的写入重定向挡了。installer.iss 增加 RedirectionGuard=no（只影响安装器自身进程，不改安装路径与权限模型）与 SetupLogging=yes（失败自动在 %TEMP% 留 Setup Log 日志，便于回报）；PrepareToInstall 里增加写权限探针，目录写不进去时当场说清「右键以管理员身份运行 / 换个目录」，不再等复制阶段才炸。
+- P0 配套：/VERYSILENT 下致命错误也可能退出码 0，所以「装没装上」不再看退出码——安装成功时在安装目录写 install-marker.txt（版本 + 时间），src/install_guard.py 新增 read_install_marker() / marker_mismatch() 与只读接口 GET /api/install-guard/install-marker，用文件核对版本。
+- P1 沙盒口径不一致：/api/sandbox/status 说没有命令行，/api/sandbox/provision/status 却说 wsb_exe=true 可以建通道。根因是 src/sandbox_provision.py 探的其实是 System32 下的 WindowsSandbox.exe，而自动建通道要的是命令行 wsb.exe；Windows 10 19045 只带前者。现在 _wsb_exe_exists() 只认 wsb.exe（含 %LOCALAPPDATA%\Microsoft\WindowsApps\wsb.exe 回退），探到「功能已启用但没有 wsb.exe」时统一返回 state='no_cli' / next_step='manual'，面板与自检都给同一句结论，并给出「先用本机模式 / 手动开沙盒 / 换机器」三条下一步。
+- P1 升级后学习库空白：旧版把群聊正文存成「wxid_xxx: + 换行 + 内容」，旧提炼规则整条跳过；而补学判据又要求「学习活动窗口为空」，窗口一旦被旧版写进过就永久跳过。现在只要学习库还是空的就补学，且补学走新增的 relearn()：逐条剥掉发送者前缀重新提炼、按消息 id 幂等，跑两次不会重复计数；面板空状态直接提示「升级后老记录要重新提炼一次，点『全部会话一键学习』」。
+- P2 记忆口径：状态卡「记忆」原来只统计已确认条数，现在同时给出待确认（candidate）与总条数，避免「学习库看着是 0」的误判。
+- 影响：运行行为只在「沙盒探测结论、学习库补学、安装器」三处变化；发送/接收通道、插件、DSH 接入、数据目录结构均未改，升级仍原地覆盖、不卸载旧版、不动用户数据。
+- 验证：新增 tests/test_sandbox_win10_176.py（8 例）、tests/test_learn_relearn176.py（8 例）、tests/test_install_marker_176.py（8 例）全绿；安装脚本用 ISCC 实编通过；全量回归与安装包实装见本轮交付报告。
+- 仍为内部测试候选：本轮只出 dist76 与安装包供真机复测，不做正式对外发布。
 ## 1.3.75 安装包里补上《用户使用说明》
 
 - 问题：安装目录随包文档有 README、微信版使用说明（逐版本变更记录）、功能对照与使用说明、封号风险与功能取舍、构建与发布说明、控制台操作指南，但最完整的《用户使用说明》（738 行，按「装好 → 配好 → 发得出去 → 出问题怎么查」写，含 9 个页签、32 个插件、错误码速查表）没有装进去，用户装完只能在源码目录里找。

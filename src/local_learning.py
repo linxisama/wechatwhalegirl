@@ -34,6 +34,10 @@ def meaningful_text(text):
     return letters >= 8 and len(raw) >= 8
 
 
+# 学习库结构版本：每次改提炼规则就加一。旧机器升级后据此重新提炼一遍，
+# 避免「归档有几千条、学习库空白」这种升级后遗症（1.3.76 用户反馈的就是这个）。
+LEARN_SCHEMA_VERSION = '2'
+
 SENDER_PREFIX = re.compile(r'^(?:wxid_[A-Za-z0-9_\-]{4,}|[A-Za-z0-9_\-]{4,40}@chatroom):\s*\n?\s*')
 
 
@@ -157,21 +161,55 @@ class LocalLearning:
                     scope).fetchone()[0]
                 if learned:
                     continue
-                window = self.db.execute(
-                    'SELECT count(*) FROM learning_messages WHERE mode=? AND account=? AND kind=? AND target=?',
-                    scope).fetchone()[0]
             except Exception:
                 continue
-            if not window:
-                out.append((room['kind'], room['target']))
+            # 1.3.75 及以前这里还要求「活动窗口为空」。可旧版会把消息写进窗口却一条也提炼不出来
+            # （群聊正文带 wxid_xxx: 换行前缀，旧逻辑整条跳过），窗口一非空就永远不再补，
+            # 用户只能自己点「一键学习」。现在只要一条学习结果都没有就补，靠 relearn 兜住窗口。
+            out.append((room['kind'], room['target']))
         return out
 
     def backfill_one(self, runtime, kind, target, limit=None):
         """补一个会话；出错就当这次没补，绝不影响收发。"""
         try:
+            scope = self.scope(runtime, kind, target)
+            learned = self.db.execute(
+                'SELECT count(*) FROM learning_items WHERE mode=? AND account=? AND kind=? AND target=?',
+                scope).fetchone()[0]
+            window = self.db.execute(
+                'SELECT count(*) FROM learning_messages WHERE mode=? AND account=? AND kind=? AND target=?',
+                scope).fetchone()[0]
+            if not learned and window:
+                return self.relearn(runtime, kind, target, limit=limit)
             return self.rebuild(runtime, kind, target, limit=limit)
         except Exception:
             return 0
+
+    def relearn(self, runtime, kind, target, limit=None):
+        """按归档原文重新提炼一遍，忽略「这条消息已经进过窗口」的去重。
+
+        rebuild 走 observe，而 observe 用 INSERT OR IGNORE 判断新消息，老窗口里的消息一律
+        changed=0，所以对升级前就写进窗口的语料 rebuild 永远是空转。这里直接调 _extract：
+        它按（会话、发言人、分类、原文、人设）算 id，并用 mid 去重证据，天然幂等，重复跑不会翻倍。
+        """
+        scope = self.scope(runtime, kind, target)
+        rows, _ = runtime.conversations.records(runtime, kind, target, limit=int(limit or self.WINDOW))
+        settings = self._settings(runtime)
+        if settings is not None and not settings.enabled:
+            return 0
+        auto_facts = settings is None or settings.get('autoRemember', True)
+        active = getattr(getattr(runtime, 'style', None), 'active_name', None) or DEFAULT_PERSONA
+        scanned = 0
+        for row in reversed(rows):
+            text = strip_sender_prefix(row['content'])
+            if not text:
+                continue
+            subject = person_of({'sender_id': row['sender_id'], 'sender_name': row['sender_name']})
+            if not subject:
+                continue
+            self._extract(scope, str(row['id']), subject, text, row['persona'] or active, auto_facts)
+            scanned += 1
+        return scanned
 
     def backfill_all(self, runtime, limit_rooms=30):
         """升级后把本地**已有**的聊天原文补学一遍。
@@ -230,9 +268,16 @@ class LocalLearning:
             for category, status, number in rows:
                 counts[category] = counts.get(category, 0) + number
                 counts[status] = counts.get(status, 0) + number
-            rooms.append(dict(kind=kind, target=target, archive=room['count'], window=window,
+            total = counts['fact'] + counts['expression']
+            archive = int(room['count'] or 0)
+            rooms.append(dict(kind=kind, target=target, archive=archive, window=window,
                               facts=counts['fact'], expressions=counts['expression'],
-                              approved=counts['approved'], candidate=counts['candidate']))
+                              approved=counts['approved'], candidate=counts['candidate'],
+                              # 归档里有原文却一条都没提炼出来时，页面要给出可点的下一步，不能只显示 0。
+                              pending=0 if total else archive,
+                              hint=('' if total else
+                                    (f'有 {archive} 条聊天记录还没提炼，点“一键学习”' if archive
+                                     else '这个会话还没有聊天记录'))))
         return rooms
 
     def bulk(self, runtime, action, kind=None, target=None, limit_rooms=30):

@@ -107,9 +107,16 @@ class LearningPanel(QWidget):
         window=sum(room['window'] for room in rooms)
         learned=sum(room['facts']+room['expressions'] for room in rooms)
         candidates=sum(room['candidate'] for room in rooms)
-        self.notice.setText(f"共 {value.get('rooms_total',len(rooms))} 个会话：活动窗口 {window} 条，"
-                            f"已学 {learned} 条（待确认 {candidates} 条）。"
-                            f"没有内容时可点“全部会话一键学习”。")
+        archive=sum(int(room.get('archive') or 0) for room in rooms)
+        if not learned and archive:
+            # 升级上来的老机器：归档有原文、学习库却是空的，光说“0 条”用户不知道还能怎么办。
+            self.notice.setText(f"共 {value.get('rooms_total',len(rooms))} 个会话、{archive} 条聊天记录，"
+                                f"但学习库还是空的：升级后老记录要重新提炼一次，"
+                                f"点“全部会话一键学习”即可（同一条不会重复计数）。")
+        else:
+            self.notice.setText(f"共 {value.get('rooms_total',len(rooms))} 个会话：活动窗口 {window} 条，"
+                                f"已学 {learned} 条（待确认 {candidates} 条）。"
+                                f"没有内容时可点“全部会话一键学习”。")
         self.load()
 
     def change(self,action):

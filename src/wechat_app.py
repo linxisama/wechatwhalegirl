@@ -908,6 +908,15 @@ class WeChatRuntime:
                 "SELECT COUNT(*) FROM learning_items WHERE status='approved'").fetchone()[0]
         except Exception:
             pass
+        # 只报 approved 会让人以为“学习库是空的”：候选条目也是学到了的东西，分开报两个数。
+        try:
+            counts["learning_candidate"] = self.db.execute(
+                "SELECT COUNT(*) FROM learning_items WHERE status='candidate'").fetchone()[0]
+            counts["learning_total"] = self.db.execute(
+                "SELECT COUNT(*) FROM learning_items").fetchone()[0]
+        except Exception:
+            counts.setdefault("learning_candidate", 0)
+            counts.setdefault("learning_total", 0)
         try:
             counts["people"] = self.db.execute("SELECT COUNT(DISTINCT subject) FROM chat_memories").fetchone()[0]
         except Exception:

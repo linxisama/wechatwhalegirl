@@ -373,16 +373,25 @@ def _probe_windows_sandbox():
     edition_id = edition.get('EditionID', '')
     supported_edition = edition_id.lower() in {'professional', 'enterprise', 'education',
                                                'professionaln', 'enterprisen', 'educationn'}
-    available = bool(exe_exists and supported_edition)
+    # 自动建隔离通道还要命令行 wsb.exe：Windows 10 只有 WindowsSandbox.exe，没有 wsb.exe，
+    # 光看 exe 会误报「可以开沙盒」，所以两个判据都要看。
+    wsb_exe = Path(system_root) / 'System32' / 'wsb.exe'
+    wsb_exists = wsb_exe.is_file()
+    available = bool(exe_exists and supported_edition and wsb_exists)
     data = {'windows_version': platform.version(), 'edition_id': edition_id,
             'product_name': edition.get('ProductName', ''),
             'display_version': edition.get('DisplayVersion', ''),
             'build': edition.get('CurrentBuildNumber', ''),
             'sandbox_exe': str(sandbox_exe), 'sandbox_exe_exists': exe_exists,
+            'wsb_exe': str(wsb_exe), 'wsb_exe_exists': wsb_exists,
             'sandbox_available': available}
     name = _windows_label(edition, edition_id)
     if available:
         return _item('windows_sandbox', 'ok', f'{name}，可以开 Windows 沙盒', data)
+    if exe_exists and supported_edition:
+        return _item('windows_sandbox', 'warn',
+                     f'{name} 能开 Windows 沙盒窗口，但没有 wsb.exe 命令行，'
+                     '自动建隔离通道用不了；先用本机模式，或换一台带 wsb.exe 的机器', data)
     if exe_exists:
         return _item('windows_sandbox', 'warn',
                      f'{name} 不是专业版/企业版，Windows 沙盒不可用；隔离后台跑不了', data)
