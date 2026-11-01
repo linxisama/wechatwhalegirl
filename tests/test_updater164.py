@@ -203,6 +203,21 @@ class FetchReleaseTests(unittest.TestCase):
         self.assertEqual(result['assets'][1]['url'],
                          'https://host.test/releases/WhaleGirlWeChat-Setup-1.3.64.exe.sha256')
 
+    def test_rate_limited_403_maps_to_rate_limited(self):
+        def open_it(request, timeout=0):
+            raise urllib.error.HTTPError('https://api.github.com/x', 403, 'Forbidden',
+                                         {'X-RateLimit-Remaining': '0'}, None)
+        with self.assertRaises(updater.UpdateError) as ctx:
+            updater.fetch_release('https://api.github.com/x', opener=open_it)
+        self.assertEqual(ctx.exception.reason, 'rate_limited')
+
+    def test_plain_403_stays_http_error(self):
+        def open_it(request, timeout=0):
+            raise urllib.error.HTTPError('https://feed.test/latest', 403, 'Forbidden', {}, None)
+        with self.assertRaises(updater.UpdateError) as ctx:
+            updater.fetch_release('https://feed.test/latest', opener=open_it)
+        self.assertEqual(ctx.exception.reason, 'http_error')
+
 
 class CheckTests(unittest.TestCase):
     def test_checksum_asset_is_linked_to_installer(self):
@@ -241,6 +256,40 @@ class CheckTests(unittest.TestCase):
         result = updater.check('', '1.3.62')
         self.assertEqual(result['state'], 'error')
         self.assertEqual(result['error']['reason'], 'not_configured')
+
+    def test_rate_limited_falls_back_to_release_asset(self):
+        calls = []
+
+        def fake_fetch(url, timeout=0):
+            calls.append(url)
+            if url == updater.DEFAULT_FEED_URL:
+                raise updater.UpdateError('rate_limited', '限流')
+            return _release(version='1.3.69')
+
+        with mock.patch.object(updater, 'fetch_release', side_effect=fake_fetch):
+            result = updater.check(updater.DEFAULT_FEED_URL, '1.3.68')
+        self.assertEqual(result['state'], 'update_available')
+        self.assertEqual(result['latest'], '1.3.69')
+        self.assertEqual(calls, [updater.DEFAULT_FEED_URL, updater.FALLBACK_FEED_URL])
+
+    def test_rate_limited_without_fallback_reports_reason(self):
+        with mock.patch.object(updater, 'fetch_release',
+                               side_effect=updater.UpdateError('rate_limited', '限流')):
+            result = updater.check(updater.DEFAULT_FEED_URL, '1.3.68')
+        self.assertEqual(result['state'], 'error')
+        self.assertEqual(result['error']['reason'], 'rate_limited')
+
+    def test_custom_feed_is_not_retried_on_rate_limit(self):
+        calls = []
+
+        def fake_fetch(url, timeout=0):
+            calls.append(url)
+            raise updater.UpdateError('rate_limited', '限流')
+
+        with mock.patch.object(updater, 'fetch_release', side_effect=fake_fetch):
+            result = updater.check('https://feed.test/latest', '1.3.68')
+        self.assertEqual(result['state'], 'error')
+        self.assertEqual(len(calls), 1)
 
 
 class DownloadTests(unittest.TestCase):

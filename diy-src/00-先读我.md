@@ -1,3 +1,9 @@
+## 1.3.69 更新源被限流时自动回退
+
+- GitHub 未登录请求按出口 IP 限流（同一 IP 每小时 60 次，超限返回 403/429），原来会让「检查更新」直接报「更新源返回 HTTP 403」。现在 `src/updater.py` 新增 `FALLBACK_FEED_URL`，只在默认的 `api.github.com` 地址被限流时改走 Releases 直链 `.../releases/latest/download/update.json`，检查更新照常成功。
+- 新增失败码 `rate_limited`，中文提示「更新源接口的请求次数已用完（GitHub 未登录请求按出口 IP 限流），请稍后再试」。
+- 只有默认地址才会回退：自定义更新源被限流时保持原样、不会悄悄换地址（新增测试覆盖该边界）。
+- 行为边界：下载、SHA256 校验、安装、插件、接收、发送逻辑一字未改；本次只动了更新源读取与错误分类。
 ## 1.3.68 更新源指向正式仓库
 
 - 自动更新的默认更新源由占位仓库 `linxisama/WhaleGirlWeChat` 改为正式仓库 `linxisama/wechatwhalegirl`（`src/updater.py:26` 的 `DEFAULT_FEED_URL`），全新安装不必再手工填地址就能查到新版本。

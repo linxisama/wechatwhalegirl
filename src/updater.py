@@ -24,6 +24,8 @@ MAX_UPDATE_BYTES = 400 * 1024 * 1024
 CHECK_TIMEOUT = 15.0
 DOWNLOAD_TIMEOUT = 30.0
 DEFAULT_FEED_URL = 'https://api.github.com/repos/linxisama/wechatwhalegirl/releases/latest'
+# GitHub 未登录请求按出口 IP 限流（403/429），此时改走 Releases 直链的 update.json。
+FALLBACK_FEED_URL = ('https://github.com/linxisama/wechatwhalegirl/releases/latest/download/update.json')
 USER_AGENT = 'WhaleGirlWeChat-Updater/1.0'
 GITHUB_ACCEPT = 'application/vnd.github+json'
 
@@ -306,6 +308,20 @@ def _response_text(response: Any) -> str:
     return str(data or '')
 
 
+def _is_rate_limited(error: Any) -> bool:
+    """GitHub 未认证请求按出口 IP 限流，超限时返回 403 或 429。"""
+    code = int(getattr(error, 'code', 0) or 0)
+    if code == 429:
+        return True
+    headers = getattr(error, 'headers', None)
+    if headers is None:
+        return False
+    try:
+        return str(headers.get('X-RateLimit-Remaining', '')).strip() == '0'
+    except Exception:
+        return False
+
+
 def fetch_release(feed_url: str, timeout: float = CHECK_TIMEOUT,
                   opener: Any = None) -> dict:
     """读取发布信息并返回 parse_release 后的结构。
@@ -328,6 +344,9 @@ def fetch_release(feed_url: str, timeout: float = CHECK_TIMEOUT,
         code = int(getattr(error, 'code', 0) or 0)
         if code == 404:
             raise UpdateError('http_404', '更新源返回 404：没有找到发布信息，请检查更新地址') from None
+        if _is_rate_limited(error):
+            raise UpdateError('rate_limited',
+                              '更新源接口的请求次数已用完（GitHub 未登录请求按出口 IP 限流），请稍后再试') from None
         raise UpdateError('http_error', f'更新源返回 HTTP {code or "错误"}，请稍后重试') from None
     except (urllib.error.URLError, TimeoutError, socket.timeout, ConnectionError, OSError):
         raise UpdateError('offline', '无法连接更新源，请检查网络或稍后重试') from None
@@ -363,6 +382,19 @@ def _check_error(current: str, reason: str, message: str, latest: str = '',
     }
 
 
+def _fetch_with_fallback(feed_url: str, timeout: float) -> dict:
+    """先按配置的地址取发布信息；只有被限流时才改走 Releases 直链的 update.json。"""
+    try:
+        return fetch_release(feed_url, timeout=timeout)
+    except UpdateError as error:
+        # 只有默认的 GitHub API 地址被限流才改走 Releases 直链；自定义更新源由用户自己负责。
+        if error.reason != 'rate_limited' or not FALLBACK_FEED_URL:
+            raise
+        if 'api.github.com' not in str(feed_url or ''):
+            raise
+        return fetch_release(FALLBACK_FEED_URL, timeout=timeout)
+
+
 def check(feed_url: str, current_version: str, timeout: float = CHECK_TIMEOUT) -> dict:
     """检查更新；任何失败都折叠成 state='error'，绝不抛异常。"""
     current = _clean_version(current_version)
@@ -370,7 +402,7 @@ def check(feed_url: str, current_version: str, timeout: float = CHECK_TIMEOUT) -
         return _check_error(current, 'not_configured',
                             '尚未配置更新源；请在设置中填写 GitHub Releases 地址后再检查')
     try:
-        release = fetch_release(feed_url, timeout=timeout)
+        release = _fetch_with_fallback(feed_url, timeout)
         if not isinstance(release, dict):
             raise UpdateError('bad_payload', '更新源返回的数据格式不正确')
         # fetch_release 已解析；再走一次 parse_release 兼容测试或自定义 fetch 返回原始 JSON。
