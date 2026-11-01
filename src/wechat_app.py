@@ -2758,6 +2758,29 @@ def create_app(runtime=None):
             except Exception as exc:
                 return {"success": False, "message": safe_error(exc)}
 
+    @app.post("/api/wechat/selftest-send")
+    async def selftest_send(req: Request):
+        """发送链路自检：往「文件传输助手」发一条带版本号的消息（必须显式确认）。
+
+        为什么需要它：接收可以只读数据库静默验证，发送必须真的发出一条才知道
+        剪贴板、草稿、标题、发送键这几步通不通。目标写死「文件传输助手」，
+        绝不碰真人会话；没带 confirm 一条也不发。
+        """
+        from .send_selftest import SendSelfTest
+        bot = app.state.bot
+        try:
+            body = await req.json()
+        except Exception:
+            body = {}
+        if not isinstance(body, dict):
+            body = {}
+        service = getattr(app.state, "send_selftest", None)
+        if service is None:
+            service = SendSelfTest(getattr(bot, "transport", None), version=APP_VERSION)
+            app.state.send_selftest = service
+        result = await service.run(confirm=bool(body.get("confirm")))
+        return dict(result, success=bool(result.get("ok")))
+
     # ── 微信会话/群列表（供控制台挑选监控群，不用手打群名）────────────────────
     @app.get("/api/wechat/sessions")
     async def wechat_sessions(limit: int = 60):

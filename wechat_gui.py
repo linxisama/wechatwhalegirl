@@ -1224,6 +1224,44 @@ class ConsoleTab(QWidget):
         except Exception as error:
             QMessageBox.warning(self, "Windows 沙盒", f"打不开沙盒窗口：{type(error).__name__}")
 
+    def _run_send_selftest(self):
+        """发送自检：真的发一条到「文件传输助手」，验证整条发送链路。
+
+        为什么必须真发：剪贴板、草稿、标题核验、发送键这几步只有真跑一次才知道
+        通不通，只读体检永远看不出「能收不能发」。目标写死「文件传输助手」，
+        不会发给任何人；标题对不上就不输入、不按发送键。
+        """
+        answer = QMessageBox.question(
+            self, "发送自检",
+            "这会用当前微信账号往「文件传输助手」真的发一条消息（不会发给任何人）。\n"
+            "发送前会自己打开这个会话；标题对不上就不输入、不按发送键。\n\n继续？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No)
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        self.btn_selftest.setEnabled(False)
+        self.set_notice("正在自检发送链路（会打开「文件传输助手」并真的发一条）…", ok=True)
+
+        def done(data):
+            self.btn_selftest.setEnabled(True)
+            data = data or {}
+            ok = bool(data.get("ok", data.get("success")))
+            parts = ["发送自检通过" if ok else "发送自检未通过"]
+            if data.get("elapsed") is not None:
+                parts.append("用时 %s 秒" % data.get("elapsed"))
+            detail = str(data.get("message") or data.get("reason") or "").strip()
+            if detail:
+                parts.append(detail)
+            text = "\n".join(parts)
+            self.set_notice("；".join(parts), ok=ok)
+            if ok:
+                QMessageBox.information(self, "发送自检", text)
+            else:
+                QMessageBox.warning(self, "发送自检", text)
+
+        call_api(self, "POST", "wechat/selftest-send", data={"confirm": True},
+                 timeout=120, on_done=done)
+
     def _build_selfcheck_panel(self):
         """「环境与自检」区域：三类只读结果放一处，删残留通道单独二次确认。
 
@@ -1264,6 +1302,11 @@ class ConsoleTab(QWidget):
         self.btn_sandbox_provision.setToolTip("检测 Windows 沙盒是否可用；未启用时提权启用，然后创建隔离通道")
         self.btn_sandbox_provision.clicked.connect(self._open_sandbox_provision)
         row.addWidget(self.btn_sandbox_provision)
+        self.btn_selftest = QPushButton("发送自检")
+        self.btn_selftest.setProperty("class", "secondary")
+        self.btn_selftest.setToolTip("真的往「文件传输助手」发一条消息，验证剪贴板/草稿/标题/发送键整条链路；不会发给任何人")
+        self.btn_selftest.clicked.connect(self._run_send_selftest)
+        row.addWidget(self.btn_selftest)
         row.addStretch(1)
         box.addLayout(row)
 
