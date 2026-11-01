@@ -1,3 +1,11 @@
+## 1.3.77 沙盒自检与沙盒面板口径统一：wsb.exe 认应用执行别名
+
+- 依据：1.3.76 交付后用全新数据目录跑「兼容性自检」，windows_sandbox 仍报「没有 wsb.exe 命令行，自动建隔离通道用不了」，可本机 wsb 命令明明能用——真正的 wsb.exe 在 %LOCALAPPDATA%\Microsoft\WindowsApps\wsb.exe（较新 Windows 把它装成应用执行别名），不在 System32。
+- 修复：src/site_profile.py 新增 _resolve_wsb_exe()，按「System32 → WindowsApps」顺序找 wsb.exe，返回（路径, 是否存在, 来源）；_probe_windows_sandbox() 改用它，数据里多给一个 wsb_exe_source（system32 / windowsapps / none），warn 文案改为「System32 与 WindowsApps 里都没有 wsb.exe 命令行」。
+- 影响：只有「只有 WindowsApps 别名」的机器会从 warn 变 ok（sandbox_available=true）；判定口径与 src/sandbox_manager.py、src/sandbox_provision.py 完全一致；发送、接收、插件、DSH 接入、数据目录结构都没有动。
+- 验证：新增 tests/test_sandbox_path_177.py 6 例（System32 优先、只有 WindowsApps 也算有命令行、两处都没有报 warn、缺 WindowsSandbox.exe、家庭版、resolver 优先级）全绿；本机实测 windows_sandbox 从 warn 变 ok，wsb_exe_source=windowsapps。
+- 文档更正：1.3.76 段末句原写「不做正式对外发布」，实际已按开源交付令发布到 GitHub Releases，本版把该句改为「已发布」并保留原校验值。
+- 发布：本轮出 dist77 与安装包，并发布到 GitHub Releases，供下载与真机复测。
 ## 1.3.76 按用户《问题日志》修四项：安装器、沙盒口径、学习库自愈、退出码
 
 - 依据：用户在 Windows 10 专业版 19045、1.3.70 上实测提交的《问题日志-2026-11-01》，四项全部复现并定位到代码。
@@ -8,7 +16,7 @@
 - P2 记忆口径：状态卡「记忆」原来只统计已确认条数，现在同时给出待确认（candidate）与总条数，避免「学习库看着是 0」的误判。
 - 影响：运行行为只在「沙盒探测结论、学习库补学、安装器」三处变化；发送/接收通道、插件、DSH 接入、数据目录结构均未改，升级仍原地覆盖、不卸载旧版、不动用户数据。
 - 验证：新增 tests/test_sandbox_win10_176.py（8 例）、tests/test_learn_relearn176.py（8 例）、tests/test_install_marker_176.py（8 例）全绿；安装脚本用 ISCC 实编通过；全量回归与安装包实装见本轮交付报告。
-- 仍为内部测试候选：本轮只出 dist76 与安装包供真机复测，不做正式对外发布。
+- 发布：本轮出 dist76 与安装包，并已作为 1.3.76 发布到 GitHub Releases（安装包 171,603,477 B，sha256 b1c474cc…），供下载与真机复测。
 ## 1.3.75 安装包里补上《用户使用说明》
 
 - 问题：安装目录随包文档有 README、微信版使用说明（逐版本变更记录）、功能对照与使用说明、封号风险与功能取舍、构建与发布说明、控制台操作指南，但最完整的《用户使用说明》（738 行，按「装好 → 配好 → 发得出去 → 出问题怎么查」写，含 9 个页签、32 个插件、错误码速查表）没有装进去，用户装完只能在源码目录里找。

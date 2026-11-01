@@ -364,6 +364,28 @@ def _windows_label(edition, edition_id):
     return f'{name}（{"，".join(parts)}）' if parts else name
 
 
+def _resolve_wsb_exe(system_root=None):
+    r"""找 Windows 沙盒的命令行 wsb.exe，顺序与 sandbox_provision 保持一致。
+
+    1.3.76 之前只认 %SystemRoot%\System32\wsb.exe，但较新的 Windows 把 wsb.exe
+    装成 %LOCALAPPDATA%\Microsoft\WindowsApps\wsb.exe 这个应用执行别名（本机 25H2 实测），
+    于是自检面板报「没有 wsb.exe 命令行」而命令行其实能用——两个面板口径不一致。
+    返回 (路径, 是否存在, 来源)，来源取值 system32 / windowsapps / none。
+    """
+    root = system_root or os.environ.get('SystemRoot') or r'C:\Windows'
+    candidates = [('system32', Path(root) / 'System32' / 'wsb.exe')]
+    local = os.environ.get('LOCALAPPDATA') or ''
+    if local:
+        candidates.append(('windowsapps', Path(local) / 'Microsoft' / 'WindowsApps' / 'wsb.exe'))
+    for source, path in candidates:
+        try:
+            if path.is_file():
+                return path, True, source
+        except OSError:
+            continue
+    return candidates[0][1], False, 'none'
+
+
 def _probe_windows_sandbox():
     edition = _registry_edition()
     system_root = os.environ.get('SystemRoot', r'C:\Windows')
@@ -375,8 +397,7 @@ def _probe_windows_sandbox():
                                                'professionaln', 'enterprisen', 'educationn'}
     # 自动建隔离通道还要命令行 wsb.exe：Windows 10 只有 WindowsSandbox.exe，没有 wsb.exe，
     # 光看 exe 会误报「可以开沙盒」，所以两个判据都要看。
-    wsb_exe = Path(system_root) / 'System32' / 'wsb.exe'
-    wsb_exists = wsb_exe.is_file()
+    wsb_exe, wsb_exists, wsb_source = _resolve_wsb_exe(system_root)
     available = bool(exe_exists and supported_edition and wsb_exists)
     data = {'windows_version': platform.version(), 'edition_id': edition_id,
             'product_name': edition.get('ProductName', ''),
@@ -384,13 +405,14 @@ def _probe_windows_sandbox():
             'build': edition.get('CurrentBuildNumber', ''),
             'sandbox_exe': str(sandbox_exe), 'sandbox_exe_exists': exe_exists,
             'wsb_exe': str(wsb_exe), 'wsb_exe_exists': wsb_exists,
+            'wsb_exe_source': wsb_source,
             'sandbox_available': available}
     name = _windows_label(edition, edition_id)
     if available:
         return _item('windows_sandbox', 'ok', f'{name}，可以开 Windows 沙盒', data)
     if exe_exists and supported_edition:
         return _item('windows_sandbox', 'warn',
-                     f'{name} 能开 Windows 沙盒窗口，但没有 wsb.exe 命令行，'
+                     f'{name} 能开 Windows 沙盒窗口，但 System32 与 WindowsApps 里都没有 wsb.exe 命令行，'
                      '自动建隔离通道用不了；先用本机模式，或换一台带 wsb.exe 的机器', data)
     if exe_exists:
         return _item('windows_sandbox', 'warn',
