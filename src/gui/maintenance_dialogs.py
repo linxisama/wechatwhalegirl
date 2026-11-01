@@ -44,6 +44,35 @@ def open_update_dialog(parent, get, post):
     dialog = UpdateDialog(parent, UpdateHttpService(get, post))
     dialog.exec()
     return dialog
+class _ThreadCallback(QDialog):
+    """对话框基类：后台线程只算结果，改控件一律回 GUI 线程。
+
+    为什么需要：service 调用放在后台线程里，避免请求超时把界面卡住；但 Qt 不允许
+    在非 GUI 线程里创建或修改控件（会打印 QObject: Cannot create children for a
+    parent that is in a different thread，严重时直接崩）。这里用一个小队列 +
+    定时器把结果搬回主线程，PyQt6 与 PySide6 行为一致。
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._deliveries = []
+        self._drain_timer = QTimer(self)
+        self._drain_timer.setInterval(50)
+        self._drain_timer.timeout.connect(self._drain_deliveries)
+        self._drain_timer.start()
+
+    def _deliver(self, on_done, result) -> None:
+        self._deliveries.append((on_done, result))
+
+    def _drain_deliveries(self) -> None:
+        while self._deliveries:
+            callback, result = self._deliveries.pop(0)
+            try:
+                callback(result)
+            except Exception:  # 回调里的显示异常不该把对话框带崩
+                pass
+
+
 class SandboxProvisionDialog(QDialog):
     """包一层沙盒面板，做成独立窗口，避免把控制台主界面挤变形。"""
 
@@ -58,7 +87,7 @@ class SandboxProvisionDialog(QDialog):
         layout = QVBoxLayout(self)
         self.panel = SandboxProvisionPanel(SandboxProvisionHttpService(get, post), self)
         layout.addWidget(self.panel, 1)
-class DshConnectDialog(QDialog):
+class DshConnectDialog(_ThreadCallback):
     """DSH 零配置连接：看清状态、一键修复、开关守护线程。"""
 
     def __init__(self, parent, get, post):
@@ -153,10 +182,7 @@ class DshConnectDialog(QDialog):
             except Exception as error:  # 适配层理论上不抛，这里兜底
                 result = {'ok': False, 'message': type(error).__name__}
             self._busy = False
-            try:
-                on_done(result)
-            except Exception:
-                pass
+            self._deliver(on_done, result)
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -197,7 +223,7 @@ class DshConnectDialog(QDialog):
             self.refresh()
 
         self._run(lambda: self.service.watch(enabled), done)
-class PluginPacksDialog(QDialog):
+class PluginPacksDialog(_ThreadCallback):
     """插件包管理：看清单、装/卸、启用/禁用。
 
     设计原则（跟主程序一致）：**不自动安装任何包**，只列出发现了什么、缺什么；
@@ -333,10 +359,7 @@ class PluginPacksDialog(QDialog):
             except Exception as error:
                 result = {'ok': False, 'message': type(error).__name__}
             self._busy = False
-            try:
-                (on_done or self._apply)(result)
-            except Exception:
-                pass
+            self._deliver(on_done or self._apply, result)
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -379,7 +402,7 @@ class PluginPacksDialog(QDialog):
         self._run(lambda: self.service.remove(str(pack.get('id'))))
 
 
-class AccountGuardDialog(QDialog):
+class AccountGuardDialog(_ThreadCallback):
     """账号与登录：看清机器人账号 vs 微信当前登录账号，必要时一键改绑。
 
     为什么要有这个窗口：微信换号后机器人只会「能收不能发」，原始报错是发送通道的
@@ -475,10 +498,7 @@ class AccountGuardDialog(QDialog):
             except Exception as error:  # 适配层理论上不抛，这里兜底
                 result = {'ok': False, 'message': type(error).__name__}
             self._busy = False
-            try:
-                on_done(result)
-            except Exception:
-                pass
+            self._deliver(on_done, result)
 
         threading.Thread(target=worker, daemon=True).start()
 
