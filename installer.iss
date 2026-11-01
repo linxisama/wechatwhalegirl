@@ -68,6 +68,8 @@ Source: "构建与发布说明.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "LICENSE"; DestDir: "{app}"; Flags: ignoreversion
 ; 控制台操作指南（给最终用户）
 Source: "控制台操作指南.md"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
+; 用户使用说明（按「装好 → 配好 → 发得出去 → 出问题怎么查」写的完整手册）
+Source: "用户使用说明.md"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 ; 可选插件包：主程序不会自动安装，只会把包放在这里给用户手动启用
 Source: "plugin-packs\*"; DestDir: "{app}\plugin-packs"; Flags: ignoreversion recursesubdirs createallsubdirs skipifsourcedoesntexist
 
