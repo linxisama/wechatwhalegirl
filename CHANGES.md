@@ -1,3 +1,9 @@
+## 1.3.68 更新源指向正式仓库
+
+- 自动更新的默认更新源由占位仓库 `linxisama/WhaleGirlWeChat` 改为正式仓库 `linxisama/wechatwhalegirl`（`src/updater.py:26` 的 `DEFAULT_FEED_URL`），全新安装不必再手工填地址就能查到新版本。
+- `tools/publish_github.ps1` 的默认远端同步改为 `https://github.com/linxisama/wechatwhalegirl.git`，`-Push` 直接推到正确仓库。
+- 发布包 `update.json` 的 `installer.url` 与 `installer.checksum_url` 现在写成绝对下载地址（`tools/make_github_release.py --base-url`），把更新源指到 `update.json` 的机器也能直接下载安装包。
+- 行为边界：接收、发送、插件、记忆、沙盒、DSH 的逻辑一字未改，本版只动了更新源常量、发布脚本默认远端与发布清单里的地址形式。
 ## 1.3.67 首次在干净机器上装机验收：插件包不再误报失败、兼容建议免绑定
 
 - 插件包页（`src/plugins/manager.py`）：包 id 与内置插件同名时，状态由「shadowed + 红色错误」改为 `builtin`，文案「该插件已内置在主程序里，插件包无需再启用」。理由：`plugin-packs/` 里的 10 个包本来就是内置插件的可选发行形态，全新安装打开插件包页原来会看到 10 条「已存在同 id 的插件，这个插件包没有生效」，看起来像坏了。真正与自定义插件撞名仍报 `shadowed`。

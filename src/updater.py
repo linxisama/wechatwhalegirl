@@ -23,7 +23,7 @@ from typing import Any, Callable, Iterable
 MAX_UPDATE_BYTES = 400 * 1024 * 1024
 CHECK_TIMEOUT = 15.0
 DOWNLOAD_TIMEOUT = 30.0
-DEFAULT_FEED_URL = 'https://api.github.com/repos/linxisama/WhaleGirlWeChat/releases/latest'
+DEFAULT_FEED_URL = 'https://api.github.com/repos/linxisama/wechatwhalegirl/releases/latest'
 USER_AGENT = 'WhaleGirlWeChat-Updater/1.0'
 GITHUB_ACCEPT = 'application/vnd.github+json'
 

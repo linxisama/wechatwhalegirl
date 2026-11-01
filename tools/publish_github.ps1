@@ -3,9 +3,9 @@
 # 用法：
 #   powershell -NoProfile -ExecutionPolicy Bypass -File tools\publish_github.ps1                 # 只初始化/提交/打标签，打印后续命令
 #   powershell -NoProfile -ExecutionPolicy Bypass -File tools\publish_github.ps1 -Push           # 真的推到 origin
-#   powershell -NoProfile -ExecutionPolicy Bypass -File tools\publish_github.ps1 -Remote https://github.com/linxisama/WhaleGirlWeChat.git
+#   powershell -NoProfile -ExecutionPolicy Bypass -File tools\publish_github.ps1 -Remote https://github.com/linxisama/wechatwhalegirl.git
 param(
-    [string]$Remote = 'https://github.com/linxisama/WhaleGirlWeChat.git',
+    [string]$Remote = 'https://github.com/linxisama/wechatwhalegirl.git',
     [switch]$Push,
     [switch]$SkipTag
 )
