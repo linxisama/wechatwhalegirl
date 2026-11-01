@@ -1224,6 +1224,14 @@ class ConsoleTab(QWidget):
         except Exception as error:
             QMessageBox.warning(self, "Windows 沙盒", f"打不开沙盒窗口：{type(error).__name__}")
 
+    def _open_account_guard(self):
+        """账号与登录：机器人账号和微信当前登录的账号不一致时，一键改绑。"""
+        try:
+            from src.gui.maintenance_dialogs import AccountGuardDialog
+            AccountGuardDialog(self, api_get, api_post).exec()
+        except Exception as error:
+            QMessageBox.warning(self, '账号与登录', f'打不开账号窗口：{type(error).__name__}')
+
     def _run_send_selftest(self):
         """发送自检：真的发一条到「文件传输助手」，验证整条发送链路。
 
@@ -1307,6 +1315,11 @@ class ConsoleTab(QWidget):
         self.btn_selftest.setToolTip("真的往「文件传输助手」发一条消息，验证剪贴板/草稿/标题/发送键整条链路；不会发给任何人")
         self.btn_selftest.clicked.connect(self._run_send_selftest)
         row.addWidget(self.btn_selftest)
+        self.btn_account_guard = QPushButton('账号与登录')
+        self.btn_account_guard.setProperty('class', 'secondary')
+        self.btn_account_guard.setToolTip('看机器人账号和微信当前登录的是不是同一个；不一致时能一键改绑')
+        self.btn_account_guard.clicked.connect(self._open_account_guard)
+        row.addWidget(self.btn_account_guard)
         row.addStretch(1)
         box.addLayout(row)
 
@@ -1862,6 +1875,14 @@ class ConsoleTab(QWidget):
             detail += '｜消息接收已停止：' + str(conn.get('error') or '等待重新连接')
         self.card_conn.update(connection_label, detail=detail,
                               ok=False if receive_stopped else None if online and environment.get('ready') is False else online)
+        mismatch = data.get('account_mismatch') or {}
+        if mismatch and running:
+            # 微信换号后发送通道会在核验阶段被拦：能收不能发，必须直接说清楚怎么改。
+            self.card_conn.update('账号不一致 · 发不出去',
+                                  detail=(f"微信登录的是 {mismatch.get('active') or '未知'}，"
+                                          f"机器人账号是 {mismatch.get('current') or '未知'}；"
+                                          '点「账号与登录」改绑，或在微信里切回机器人账号'),
+                                  ok=False)
         source = getattr(self, '_notice_source', '')
         if source in ('test-wechat', 'wechat-status'):
             # 微信体检只代表当时的只读结果；当前失败不能继续挂着旧绿色结论。

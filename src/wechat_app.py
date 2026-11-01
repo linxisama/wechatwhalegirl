@@ -2779,7 +2779,15 @@ def create_app(runtime=None):
             service = SendSelfTest(getattr(bot, "transport", None), version=APP_VERSION)
             app.state.send_selftest = service
         result = await service.run(confirm=bool(body.get("confirm")))
-        return dict(result, success=bool(result.get("ok")))
+        mismatch = dict(getattr(bot, '_account_mismatch', {}) or {})
+        if not result.get('ok') and mismatch:
+            # 账号错位时发送通道是在核验阶段被拦的，原始报错是「未唯一核验账号与微信窗口」，
+            # 用户看不出该做什么。换成能照做的说明，原始原因留在 detail 里备查。
+            from .account_guard import mismatch_detail
+            result = dict(result, reason='account_mismatch',
+                          detail=result.get('message') or '',
+                          message=mismatch_detail(mismatch))
+        return dict(result, success=bool(result.get('ok')))
 
     # ── 微信会话/群列表（供控制台挑选监控群，不用手打群名）────────────────────
     @app.get("/api/wechat/sessions")
@@ -2823,6 +2831,100 @@ def create_app(runtime=None):
                 "normalized_dir": normalized,
                 "path_account": path_account(directory),
                 "accounts": rows}
+
+    async def _account_guard_state():
+        """读一次账号现场：配置的机器人账号、微信当前登录的账号、两者关系。
+
+        证据优先级：微信进程打开的数据库目录（最可靠，但需要管理员权限）→ 这次连接实际
+        用的账号目录。都读不到就如实报 unknown，不猜。
+        """
+        from .account_guard import judge
+        from .wechat_bridge import active_database_account, describe_accounts
+        bot = app.state.bot
+        conn = bot.bridge.status()
+        configured = str(bot.config.get("wechat_only.account", "") or "")
+        directory = str(getattr(bot.bridge, "_db_dir_hint", "") or bot.bridge.db_dir or "")
+        try:
+            logged_in = await asyncio.to_thread(active_database_account, directory)
+        except Exception:
+            logged_in = ""
+        if not logged_in:
+            logged_in = str(conn.get("account_dir") or "")
+        names = {}
+        try:
+            rows = await asyncio.to_thread(describe_accounts, directory)
+            names = {str(row.get("account") or ""): str(row.get("name") or "") for row in rows}
+        except Exception:
+            names = {}
+        state = judge(configured, logged_in, names.get(configured, ""), names.get(logged_in, ""))
+        state.update({
+            "success": True,
+            "online": bool(conn.get("online")),
+            "account_dir": str(conn.get("account_dir") or ""),
+            "nickname": str(conn.get("account") or ""),
+            "mismatch": dict(getattr(bot, "_account_mismatch", {}) or {}),
+            "accounts": [{"account": key, "name": value} for key, value in names.items()],
+        })
+        return state
+
+    @app.get("/api/wechat/account-guard")
+    async def account_guard():
+        """机器人账号 vs 微信当前登录账号：状态、能照做的提示、可执行的动作。"""
+        try:
+            return await _account_guard_state()
+        except Exception as exc:
+            return {"success": False, "message": safe_error(exc), "match": "unknown",
+                    "hint": "", "can_rebind": False}
+
+    @app.post("/api/wechat/account-guard/rebind")
+    async def account_guard_rebind(request: Request):
+        """把机器人账号改成微信当前登录的这个号，并按需重连一次。
+
+        只改这一个配置项：原来那个号未处理的消息仍留在库里，切回去还能看到，不会丢。
+        已经一致时直接拒绝——重连一次要重新定位校准窗口十几秒，不做无意义的重启。
+        """
+        from .account_guard import rebind_target
+        bot = app.state.bot
+        raw = await request.body()
+        try:
+            body = json.loads(raw) if raw else {}
+        except Exception:
+            body = {}
+        if not isinstance(body, dict) or body.get("confirm") is not True:
+            return {"success": False, "reason": "not_confirmed",
+                    "message": "改绑会让机器人改用当前登录的微信账号收发消息，请先确认。"}
+        state = await _account_guard_state()
+        target = rebind_target(state.get("configured", ""), state.get("logged_in", ""))
+        if not target.get("ok"):
+            return {"success": False, "reason": target.get("reason", ""),
+                    "message": target.get("message", "")}
+        value = str(target.get("account") or "")
+        was_running = bool(bot.running)
+        warning = ""
+        async with bot.lock:
+            if was_running:
+                try:
+                    await bot.stop()
+                except Exception as exc:
+                    warning = safe_error(exc)
+            bot.config.set("wechat_only.account", value)
+            bot.config.set("wechat.account", value)
+            bot.config.save()
+            bot.bridge.configured_account = value
+            bot._account_mismatch = {}
+            bot._account_mismatch_hits = 0
+            bot.note("已把机器人账号改绑为「" + str(state.get("logged_in_name") or value) + "」")
+            if was_running:
+                try:
+                    await bot.start()
+                except Exception as exc:
+                    warning = safe_error(exc)
+        message = "已改绑到当前登录账号"
+        if was_running and not warning:
+            message += "，微信正在重新连接（约 5~20 秒）"
+        elif warning:
+            message += f"，但重连失败：{warning}"
+        return {"success": True, "account": value, "restarted": was_running, "message": message}
 
     # ── 人设 ────────────────────────────────────────────────────────────────
     @app.get("/api/personas")

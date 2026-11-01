@@ -198,5 +198,31 @@ class PluginPacksHttpService(_Base):
         return self._unwrap(self._call('enabled', {'id': _text(pack_id), 'enabled': bool(enabled)}))
 
 
+
+class AccountGuardHttpService(_Base):
+    """账号与登录：机器人账号 vs 微信当前登录账号，以及一键改绑。"""
+
+    routes = {
+        'state': ('GET', 'wechat/account-guard'),
+        'rebind': ('POST', 'wechat/account-guard/rebind'),
+    }
+
+    def _state(self, result):
+        if isinstance(result, dict) and result.get('success') is not False:
+            value = dict(result)
+            value['ok'] = True
+            return value
+        if isinstance(result, dict):
+            return {'ok': False,
+                    'reason': _text(result.get('reason') or 'internal'),
+                    'message': _text(result.get('message') or '读取账号状态失败')}
+        return {'ok': False, 'reason': 'internal', 'message': '后台返回了无法识别的结果'}
+
+    def state(self):
+        return self._state(self._call('state'))
+
+    def rebind(self):
+        return self._state(self._call('rebind', {'confirm': True}))
+
 __all__ = ['UpdateHttpService', 'SandboxProvisionHttpService', 'DshConnectHttpService',
-           'PluginPacksHttpService']
+           'PluginPacksHttpService', 'AccountGuardHttpService']

@@ -28,6 +28,14 @@ _DSH_STATE = {
     'error': '需要人工确认：接入脚本被本地改过，控制台不会覆盖',
     'incomplete': '还没就绪：点「一键修复连接」补齐缺失步骤',
 }
+_ACCOUNT_MATCH = {
+    'same': '一致：微信登录的就是机器人账号',
+    'different': '不一致：能收消息但发不出去',
+    'auto': '未指定账号：程序自动判断',
+    'unknown': '无法判断：读不到当前登录账号',
+}
+
+
 def open_update_dialog(parent, get, post):
     """打开「检查更新」对话框；导入失败时把原因抛给调用方显示。"""
     from src.gui.update_dialog import UpdateDialog
@@ -370,4 +378,145 @@ class PluginPacksDialog(QDialog):
             return
         self._run(lambda: self.service.remove(str(pack.get('id'))))
 
-__all__ = ['open_update_dialog', 'SandboxProvisionDialog', 'DshConnectDialog', 'PluginPacksDialog']
+
+class AccountGuardDialog(QDialog):
+    """账号与登录：看清机器人账号 vs 微信当前登录账号，必要时一键改绑。
+
+    为什么要有这个窗口：微信换号后机器人只会「能收不能发」，原始报错是发送通道的
+    「未唯一核验账号与微信窗口」，用户看不出该做什么；设置页里改账号还得自己找目录。
+    """
+
+    def __init__(self, parent, get, post):
+        super().__init__(parent)
+        from src.gui.service_adapters import AccountGuardHttpService
+
+        self.service = AccountGuardHttpService(get, post)
+        self._busy = False
+        self.setWindowTitle('账号与登录')
+        self.setStyleSheet(_DIALOG_STYLE)
+        self.resize(640, 430)
+
+        layout = QVBoxLayout(self)
+        title = QLabel('账号与登录')
+        title.setStyleSheet('font-size: 17px; font-weight: 600;')
+        layout.addWidget(title)
+
+        hint = QLabel('机器人只会用配置里指定的那个微信账号收发消息。微信换了号之后，'
+                      '表现就是「能收消息但发不出去」——这里的「改绑」把机器人改成当前登录的号。')
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+
+        self.state_label = QLabel('正在读取账号状态…')
+        self.state_label.setWordWrap(True)
+        self.state_label.setStyleSheet('font-weight: 600;')
+        layout.addWidget(self.state_label)
+
+        self.detail = QTextEdit()
+        self.detail.setReadOnly(True)
+        self.detail.setPlaceholderText('这里显示机器人账号、微信当前登录的账号和本机账号目录。')
+        layout.addWidget(self.detail, 1)
+
+        row = QHBoxLayout()
+        self.btn_refresh = QPushButton('刷新')
+        self.btn_refresh.clicked.connect(self.refresh)
+        row.addWidget(self.btn_refresh)
+        self.btn_rebind = QPushButton('改绑到当前登录账号')
+        self.btn_rebind.setEnabled(False)
+        self.btn_rebind.setToolTip('只改「机器人账号」这一项配置，然后重新连接一次微信')
+        self.btn_rebind.clicked.connect(self.rebind)
+        row.addWidget(self.btn_rebind)
+        row.addStretch(1)
+        close_button = QPushButton('关闭')
+        close_button.clicked.connect(self.accept)
+        row.addWidget(close_button)
+        layout.addLayout(row)
+
+        QTimer.singleShot(0, self.refresh)
+
+    # --- 展示 -------------------------------------------------------------
+    def _render(self, state: dict) -> None:
+        match = str(state.get('match') or 'unknown')
+        self.state_label.setText(_ACCOUNT_MATCH.get(match, '未知状态：' + match))
+        lines = [
+            '机器人账号：' + str(state.get('configured_name') or '（未指定，自动判断）'),
+            '微信当前登录：' + str(state.get('logged_in_name') or '（读不到）'),
+        ]
+        if state.get('nickname'):
+            lines.append('当前连接账号：' + str(state.get('nickname')))
+        if state.get('hint'):
+            lines.append('')
+            lines.append(str(state.get('hint')))
+        accounts = state.get('accounts') or []
+        names = [str(item.get('name') or item.get('account'))
+                 for item in accounts if isinstance(item, dict)]
+        if names:
+            lines.append('')
+            lines.append('本机账号目录：' + '、'.join(names))
+        self.detail.setPlainText(chr(10).join(lines))
+        self.btn_rebind.setEnabled(bool(state.get('can_rebind')) and not self._busy)
+
+    def _fail(self, result) -> None:
+        message = ''
+        if isinstance(result, dict):
+            message = str(result.get('message') or result.get('reason') or '')
+        self.state_label.setText('读取失败：' + (message or '请稍后重试'))
+
+    def _run(self, func, on_done) -> None:
+        """service 调用放到后台线程，避免请求把界面卡住。"""
+        if self._busy:
+            return
+        self._busy = True
+        self.btn_refresh.setEnabled(False)
+        self.btn_rebind.setEnabled(False)
+
+        def worker():
+            try:
+                result = func()
+            except Exception as error:  # 适配层理论上不抛，这里兜底
+                result = {'ok': False, 'message': type(error).__name__}
+            self._busy = False
+            try:
+                on_done(result)
+            except Exception:
+                pass
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    # --- 动作 -------------------------------------------------------------
+    def refresh(self):
+        def done(result):
+            self.btn_refresh.setEnabled(True)
+            if isinstance(result, dict) and result.get('ok'):
+                self._render(result)
+            else:
+                self._fail(result)
+
+        self._run(self.service.state, done)
+
+    def rebind(self):
+        try:
+            from PyQt6.QtWidgets import QMessageBox
+        except ImportError:  # pragma: no cover
+            from PySide6.QtWidgets import QMessageBox
+        answer = QMessageBox.question(
+            self, '改绑到当前登录账号',
+            '改绑后机器人会用微信当前登录的这个账号收发消息。' + chr(10) +
+            '原来那个账号未处理的消息仍留在数据库里，切回去还能看到。' + chr(10) * 2 +
+            '确定要改绑吗？',
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No)
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        self.state_label.setText('正在改绑并重新连接（约 5~20 秒）…')
+
+        def done(result):
+            if isinstance(result, dict) and result.get('ok'):
+                self.state_label.setText(str(result.get('message') or '已改绑'))
+            else:
+                self._fail(result)
+            self.refresh()
+
+        self._run(lambda: self.service.rebind(), done)
+
+__all__ = ['open_update_dialog', 'SandboxProvisionDialog', 'DshConnectDialog', 'PluginPacksDialog',
+           'AccountGuardDialog']
