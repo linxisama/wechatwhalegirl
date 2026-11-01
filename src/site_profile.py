@@ -364,26 +364,89 @@ def _windows_label(edition, edition_id):
     return f'{name}（{"，".join(parts)}）' if parts else name
 
 
-def _resolve_wsb_exe(system_root=None):
+def _known_local_appdata():
+    r"""取真正的 LocalAppData 目录。
+
+    不信任环境变量：控制台被计划任务/服务拉起时 LOCALAPPDATA 可能指向
+    systemprofile，或被启动器改写到别处，而 wsb.exe 的应用执行别名永远在当前
+    用户的真实 LocalAppData 下。先问 Known Folder API，问不到才退回环境变量。
+    """
+    try:
+        from ctypes import wintypes
+
+        class _GUID(ctypes.Structure):
+            _fields_ = [('Data1', wintypes.DWORD), ('Data2', wintypes.WORD),
+                        ('Data3', wintypes.WORD), ('Data4', ctypes.c_ubyte * 8)]
+
+        # FOLDERID_LocalAppData = {F1B32785-6FBA-4FCF-9D55-7B8E7F157091}
+        guid = _GUID(0xF1B32785, 0x6FBA, 0x4FCF,
+                     (ctypes.c_ubyte * 8)(0x9D, 0x55, 0x7B, 0x8E, 0x7F, 0x15, 0x70, 0x91))
+        shell32 = ctypes.WinDLL('shell32', use_last_error=True)
+        shell32.SHGetKnownFolderPath.argtypes = [ctypes.POINTER(_GUID), wintypes.DWORD,
+                                                 wintypes.HANDLE,
+                                                 ctypes.POINTER(ctypes.c_wchar_p)]
+        shell32.SHGetKnownFolderPath.restype = ctypes.c_long
+        out = ctypes.c_wchar_p()
+        if shell32.SHGetKnownFolderPath(ctypes.byref(guid), 0, None, ctypes.byref(out)) == 0:
+            value = (out.value or '').strip()
+            try:
+                ctypes.WinDLL('ole32').CoTaskMemFree(out)
+            except Exception:
+                pass
+            if value:
+                return value
+    except Exception:
+        pass
+    return str(os.environ.get('LOCALAPPDATA') or '').strip()
+
+
+def _wsb_alias_dirs(local_appdata=None):
+    r"""所有可能放 wsb.exe 应用执行别名的 WindowsApps 目录（去重、保序）。"""
+    if local_appdata is not None:
+        candidates = [local_appdata]
+    else:
+        candidates = [os.environ.get('LOCALAPPDATA') or '', _known_local_appdata()]
+    seen, dirs = set(), []
+    for item in candidates:
+        text = str(item or '').strip().strip('"')
+        if not text:
+            continue
+        key = text.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        dirs.append(Path(text) / 'Microsoft' / 'WindowsApps')
+    return dirs
+
+
+def _resolve_wsb_exe(system_root=None, local_appdata=None, path_env=None):
     r"""找 Windows 沙盒的命令行 wsb.exe，顺序与 sandbox_provision 保持一致。
 
     1.3.76 之前只认 %SystemRoot%\System32\wsb.exe，但较新的 Windows 把 wsb.exe
     装成 %LOCALAPPDATA%\Microsoft\WindowsApps\wsb.exe 这个应用执行别名（本机 25H2 实测），
     于是自检面板报「没有 wsb.exe 命令行」而命令行其实能用——两个面板口径不一致。
-    返回 (路径, 是否存在, 来源)，来源取值 system32 / windowsapps / none。
+    1.3.78 再补两处：别名目录用 Known Folder API 取（环境变量可能被改写、指向
+    systemprofile 或干脆为空），最后在 PATH 里兜底搜一次。
+    返回 (路径, 是否存在, 来源)，来源取值 system32 / windowsapps / path / none。
     """
     root = system_root or os.environ.get('SystemRoot') or r'C:\Windows'
-    candidates = [('system32', Path(root) / 'System32' / 'wsb.exe')]
-    local = os.environ.get('LOCALAPPDATA') or ''
-    if local:
-        candidates.append(('windowsapps', Path(local) / 'Microsoft' / 'WindowsApps' / 'wsb.exe'))
+    system32 = Path(root) / 'System32' / 'wsb.exe'
+    candidates = [('system32', system32)]
+    for alias_dir in _wsb_alias_dirs(local_appdata):
+        candidates.append(('windowsapps', alias_dir / 'wsb.exe'))
+    raw_path = os.environ.get('PATH', '') if path_env is None else path_env
+    for entry in str(raw_path or '').split(os.pathsep):
+        text = entry.strip().strip('"')
+        if not text:
+            continue
+        candidates.append(('path', Path(text) / 'wsb.exe'))
     for source, path in candidates:
         try:
             if path.is_file():
                 return path, True, source
         except OSError:
             continue
-    return candidates[0][1], False, 'none'
+    return system32, False, 'none'
 
 
 def _probe_windows_sandbox():
@@ -412,7 +475,7 @@ def _probe_windows_sandbox():
         return _item('windows_sandbox', 'ok', f'{name}，可以开 Windows 沙盒', data)
     if exe_exists and supported_edition:
         return _item('windows_sandbox', 'warn',
-                     f'{name} 能开 Windows 沙盒窗口，但 System32 与 WindowsApps 里都没有 wsb.exe 命令行，'
+                     f'{name} 能开 Windows 沙盒窗口，但 System32、WindowsApps 与 PATH 里都没有 wsb.exe 命令行，'
                      '自动建隔离通道用不了；先用本机模式，或换一台带 wsb.exe 的机器', data)
     if exe_exists:
         return _item('windows_sandbox', 'warn',

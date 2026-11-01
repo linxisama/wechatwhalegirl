@@ -40,7 +40,11 @@ class SandboxPathTests(unittest.TestCase):
         return {'SystemRoot': str(system_root), 'LOCALAPPDATA': str(local)}
 
     def _probe(self, env, edition=None):
-        with mock.patch.dict(os.environ, env, clear=False), \
+        # 1.3.78 起解析器还会看 Known Folder 与 PATH：测试必须把这两处也钉住，
+        # 否则本机真实装着的 wsb.exe 会漏进来，用例变成「看运气」。
+        with mock.patch.dict(os.environ, dict(env, PATH=''), clear=False), \
+                mock.patch.object(site_profile, '_known_local_appdata',
+                                  return_value=env.get('LOCALAPPDATA', '')), \
                 mock.patch.object(site_profile, '_registry_edition',
                                   return_value=dict(edition or PRO_EDITION)):
             return site_profile._probe_windows_sandbox()

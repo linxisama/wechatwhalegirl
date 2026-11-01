@@ -18,6 +18,8 @@ import sys
 import time
 from pathlib import Path
 
+from .site_profile import _resolve_wsb_exe
+
 FEATURE_NAME = 'Containers-DisposableClientVM'
 FEATURE_LABEL = 'Windows 沙盒'
 # 只有这些版本带「Windows 沙盒」可选功能；Core（家庭版）永远没有。
@@ -168,7 +170,15 @@ def _wsb_exe_path():
     注意：Windows 10（19045 实测）根本没有 wsb.exe，只有 WindowsSandbox.exe；
     wsb.exe 是较新版本才带的命令行入口。1.3.75 及以前这里探的是 WindowsSandbox.exe，
     于是 Windows 10 上面板显示「沙盒已就绪、可以去建通道」，真去建通道却报找不到命令行。
+    1.3.78 起与 site_profile 共用同一个解析器（System32 → WindowsApps 别名 → PATH），
+    保证「兼容性自检」与「沙盒面板」对同一台机器给出同一个结论。
     """
+    try:
+        path, exists, _source = _resolve_wsb_exe()
+        if exists:
+            return Path(path)
+    except Exception:
+        pass
     root = os.environ.get('SystemRoot') or r'C:\Windows'
     return Path(root) / 'System32' / 'wsb.exe'
 
@@ -176,17 +186,9 @@ def _wsb_exe_path():
 def _wsb_exe_exists():
     """只认命令行 wsb.exe；有 WindowsSandbox.exe 但没 wsb.exe 的系统算「没有命令行」。"""
     try:
-        if _wsb_exe_path().is_file():
-            return True
-    except OSError:
-        pass
-    try:
-        local = os.environ.get('LOCALAPPDATA') or ''
-        if local:
-            return (Path(local) / 'Microsoft' / 'WindowsApps' / 'wsb.exe').is_file()
-    except OSError:
-        pass
-    return False
+        return bool(_resolve_wsb_exe()[1])
+    except Exception:
+        return False
 
 
 def _parse_feature_state(text):

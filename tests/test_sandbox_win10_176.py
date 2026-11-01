@@ -35,11 +35,19 @@ class _SystemRoot:
     def __enter__(self):
         self._patch = mock.patch.dict(os.environ, {
             'SystemRoot': str(self.root),
-            'LOCALAPPDATA': str(self.root / 'no-local-appdata')})
+            'LOCALAPPDATA': str(self.root / 'no-local-appdata'),
+            'PATH': ''})
         self._patch.start()
+        # 1.3.78 起 wsb 解析器还会问 Known Folder API，这里一并钉到临时目录，
+        # 免得本机真实安装的 wsb.exe 让「没有命令行」的用例失效。
+        from src import site_profile
+        self._known = mock.patch.object(site_profile, '_known_local_appdata',
+                                        return_value=str(self.root / 'no-local-appdata'))
+        self._known.start()
         return self
 
     def __exit__(self, *exc):
+        self._known.stop()
         self._patch.stop()
         self._tmp.cleanup()
         return False

@@ -1,3 +1,12 @@
+## 1.3.78 wsb.exe 解析器改问 Known Folder 与 PATH：环境变量被改写也不误报
+
+- 依据：1.3.77 用「干净数据目录」模拟新电脑时，把 LOCALAPPDATA 指到临时目录，兼容性自检立刻报「System32 与 WindowsApps 里都没有 wsb.exe 命令行」，可命令行其实能用。真实世界同样会发生：控制台被计划任务或服务拉起时，LOCALAPPDATA 会指向 systemprofile 或被启动器改写，于是自检把「能开沙盒」误报成「沙盒不可用」。
+- 修复：src/site_profile.py 新增 _known_local_appdata()（用 SHGetKnownFolderPath 问真实的 LocalAppData，问不到才退回环境变量）与 _wsb_alias_dirs()；_resolve_wsb_exe() 增加 local_appdata / path_env 参数，查找顺序改为 System32 → 环境变量里的 WindowsApps → Known Folder 的 WindowsApps → PATH 里逐个目录兜底，来源取值新增 path。
+- 口径统一：src/sandbox_provision.py 的 _wsb_exe_path() / _wsb_exe_exists() 改为共用 site_profile 的同一个解析器，沙盒面板与兼容性自检对同一台机器只会给出同一个结论。
+- 测试隔离：tests/test_sandbox_path_177.py 与 tests/test_sandbox_win10_176.py 现在把 PATH 与 Known Folder 一并钉住（否则本机真实装着的 wsb.exe 会漏进用例，让「没有命令行」的断言变成看运气）；新增 tests/test_wsb_resolver_178.py 5 例（环境变量被改写仍按 Known Folder 找到、PATH 兜底、两处都没有报 none、System32 仍优先、API 不可用时退回环境变量）。
+- 实测：把 LOCALAPPDATA 指到临时目录后跑 _probe_windows_sandbox()，windows_sandbox 从 warn 变 ok，wsb_exe_source=windowsapps，sandbox_available=true。
+- 影响：只有「wsb.exe 只存在于应用执行别名或 PATH 里」的机器会从 warn 变 ok；System32 有的机器结论不变；发送、接收、插件、DSH 接入、数据目录结构都没有动。
+- 发布：本轮出 dist78 与安装包，并发布到 GitHub Releases，供下载与真机复测。
 ## 1.3.77 沙盒自检与沙盒面板口径统一：wsb.exe 认应用执行别名
 
 - 依据：1.3.76 交付后用全新数据目录跑「兼容性自检」，windows_sandbox 仍报「没有 wsb.exe 命令行，自动建隔离通道用不了」，可本机 wsb 命令明明能用——真正的 wsb.exe 在 %LOCALAPPDATA%\Microsoft\WindowsApps\wsb.exe（较新 Windows 把它装成应用执行别名），不在 System32。
