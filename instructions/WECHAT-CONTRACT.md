@@ -1,3 +1,11 @@
+## 1.3.70 修复沙盒面板卡在「需要重启」
+
+- 「需要重启」不再永久有效：`src/sandbox_provision.py` 新增 `REBOOT_GRACE_SECONDS=90.0`、`_system_boot_time()`、`_rebooted_since()`，用系统开机时刻判断记录是否过期——电脑重启过一次之后，旧的 `pending_reboot` 记录自动失效，`needs_reboot` 归零。
+- 任何状态都不再把 `next_step` 设成 `reboot`。原来它会把「启用 Windows 沙盒」和「创建隔离通道」同时禁掉，只留一个回答「还没有启用记录」的重检按钮，形成出不去死循环。现在：已启用 → `create_channel`；未启用或组件缺失 → `enable`；不支持 → `none`。
+- `src/sandbox_provision_api.py` 的 `check()` 在没有提权日志时（提权已就绪时 DISM 就地执行，本来就没有日志文件）改调新增的 `_probe_verdict()`，按真实探测结果回答「已经启用，可以直接点创建隔离通道」/「还没启用，点启用」/「版本不支持」/「读不到 DISM」，不再回答「请先点启用 Windows 沙盒」。
+- `src/gui/sandbox_provision_panel.py`：「我已重启，重新检测」改为只读出口、任何时候都能点；「创建隔离通道」在 `create_channel` 与 `launch` 两种下一步都放行。
+- 测试：`tests/test_sandbox_provision165.py` 29 → 37 例（重启后旧记录失效、任何状态都不出现 `reboot` 下一步、无日志时 `check()` 的四种结论、面板按钮新契约）。
+- 行为不变：发送与接收链路、插件体系、更新链路一律未改；提权方式与 DISM 调用参数未改。
 ## 1.3.69 更新源被限流时自动回退
 
 - GitHub 未登录请求按出口 IP 限流（同一 IP 每小时 60 次，超限返回 403/429），原来会让「检查更新」直接报「更新源返回 HTTP 403」。现在 `src/updater.py` 新增 `FALLBACK_FEED_URL`，只在默认的 `api.github.com` 地址被限流时改走 Releases 直链 `.../releases/latest/download/update.json`，检查更新照常成功。

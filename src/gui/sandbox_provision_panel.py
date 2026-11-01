@@ -138,8 +138,9 @@ class SandboxProvisionPanel(QtWidgets.QWidget):
     def _sync_buttons(self, step):
         ready = not self._busy
         self.enable_button.setEnabled(ready and step == 'enable')
-        self.recheck_button.setEnabled(ready and step == 'reboot')
-        self.channel_button.setEnabled(ready and step == 'create_channel')
+        # “我已重启，重新检测”只是只读探测：状态再怎么怪，用户都要有这一个出口，永远可点。
+        self.recheck_button.setEnabled(ready)
+        self.channel_button.setEnabled(ready and step in ('create_channel', 'launch'))
         # “查看禁用方法”只是读一段文本，任何时候都能点。
         self.rollback_button.setEnabled(ready)
         return ready

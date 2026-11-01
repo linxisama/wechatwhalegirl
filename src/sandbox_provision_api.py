@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -49,10 +50,36 @@ class SandboxProvisionService:
 
     def check(self, log_path=None):
         path = str(log_path or '') or self.last_log_path()
-        if not path:
-            return {'ok': False, 'state': 'pending', 'reason': 'log_missing', 'log_path': '',
-                    'message': '还没有启用记录：请先点“启用 Windows 沙盒”。'}
-        return provision.check_elevation_result(path)
+        if path and Path(path).is_file():
+            return provision.check_elevation_result(path)
+        return self._probe_verdict(path)
+
+    def _probe_verdict(self, log_path):
+        """没有提权日志时直接探测本机功能状态：已启用的机器不该被要求再点一次“启用”。"""
+        status = provision.status(runner=self.runner, log_dir=self.log_dir)
+        state = str(status.get('state') or 'unknown')
+        needs_reboot = bool(status.get('needs_reboot'))
+        base = {'log_path': str(log_path or ''), 'needs_reboot': needs_reboot, 'state': state,
+                'hint': str(status.get('hint') or ''), 'next_step': status.get('next_step')}
+        if state == 'enabled':
+            text = 'Windows 沙盒功能已经启用，不需要再启用'
+            text += ('；重启电脑一次后更稳，也可以直接点“创建隔离通道”' if needs_reboot
+                     else '；可以直接点“创建隔离通道”')
+            base.update({'ok': True, 'reason': 'enabled', 'next_step': 'create_channel',
+                         'message': text})
+            return base
+        if state in ('disabled', 'absent'):
+            base.update({'ok': False, 'reason': 'not_enabled', 'next_step': 'enable',
+                         'message': '本机还没启用 Windows 沙盒：点“启用 Windows 沙盒”，'
+                                    '在管理员授权窗口点“是”，完成后重启电脑一次'})
+            return base
+        if state == 'unsupported':
+            base.update({'ok': False, 'reason': 'unsupported_edition', 'next_step': 'none',
+                         'message': str(status.get('message') or '这台机器的版本不支持 Windows 沙盒')})
+            return base
+        base.update({'ok': False, 'reason': 'dism_unavailable', 'next_step': 'enable',
+                     'message': str(status.get('message') or '无法确认 Windows 沙盒功能状态')})
+        return base
 
     def create_channel(self):
         return provision.create_channel(self.runtime, manager=None, runner=self.runner)

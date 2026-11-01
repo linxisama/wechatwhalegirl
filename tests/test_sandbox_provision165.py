@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import os
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -242,13 +243,30 @@ class StatusTests(ProvisionCase):
         self.assertEqual(result['state'], 'enabled')
         self.assertEqual(result['next_step'], 'create_channel')
 
-    def test_pending_reboot_next_step_reboot(self):
-        self.write_record({'state': 'pending_reboot', 'log_path': '', 'updated': 1.0})
+    def test_pending_reboot_still_allows_channel(self):
+        self.write_record({'state': 'pending_reboot', 'log_path': '', 'updated': time.time()})
         result = provision.status(runner=make_runner(ENABLED_OUT), registry_reader=PRO_EDITION,
                                   log_dir=self.tmp)
         self.assertTrue(result['needs_reboot'])
-        self.assertEqual(result['next_step'], 'reboot')
+        self.assertEqual(result['next_step'], 'create_channel')
         self.assertIn('重启', result['message'])
+
+    def test_rebooted_after_record_clears_pending_flag(self):
+        # 记录写着“待重启”，但电脑在那之后已经重启过：标记必须自己失效，否则面板永远卡住。
+        self.write_record({'state': 'pending_reboot', 'log_path': '', 'updated': 1.0})
+        result = provision.status(runner=make_runner(ENABLED_OUT), registry_reader=PRO_EDITION,
+                                  log_dir=self.tmp)
+        self.assertFalse(result['needs_reboot'])
+        self.assertEqual(result['next_step'], 'create_channel')
+        self.assertNotIn('需要重启电脑后才生效', result['message'])
+
+    def test_no_step_ever_asks_for_reboot_only(self):
+        # 任何状态都不能把 next_step 设成 'reboot'：那会把启用和建通道两个按钮同时禁掉。
+        for runner in (make_runner(ENABLED_OUT), make_runner(DISABLED_OUT),
+                       make_runner(ABSENT_OUT), make_runner('', returncode=740)):
+            self.write_record({'state': 'pending_reboot', 'log_path': '', 'updated': time.time()})
+            result = provision.status(runner=runner, registry_reader=PRO_EDITION, log_dir=self.tmp)
+            self.assertNotEqual(result['next_step'], 'reboot', result['state'])
 
     def test_disabled_next_step_enable(self):
         result = provision.status(runner=make_runner(DISABLED_OUT), registry_reader=PRO_EDITION,
@@ -268,7 +286,8 @@ class CreateChannelTests(ProvisionCase):
         self.assertEqual(manager.calls, [])
 
     def test_needs_reboot(self):
-        self.write_record({'state': 'pending_reboot', 'log_path': '', 'updated': 1.0})
+        # 刚提交启用、还没重启：此时建通道会失败，先拦住。
+        self.write_record({'state': 'pending_reboot', 'log_path': '', 'updated': time.time()})
         manager = FakeManager()
         with self.patched_defaults():
             result = provision.create_channel(None, manager=manager,
@@ -277,6 +296,16 @@ class CreateChannelTests(ProvisionCase):
         self.assertEqual(result['state'], 'needs_reboot')
         self.assertEqual(result['reason'], 'needs_reboot')
         self.assertEqual(manager.calls, [])
+
+    def test_stale_reboot_record_does_not_block_channel(self):
+        # 记录是上次开机前写的：电脑已经重启过，就不该再拿它挡路。
+        self.write_record({'state': 'pending_reboot', 'log_path': '', 'updated': 1.0})
+        manager = FakeManager()
+        with self.patched_defaults():
+            result = provision.create_channel(None, manager=manager,
+                                              runner=make_runner(ENABLED_OUT))
+        self.assertTrue(result['ok'])
+        self.assertEqual(len(manager.calls), 1)
 
     def test_success_normalised(self):
         manager = FakeManager()
@@ -364,6 +393,43 @@ class ApiTests(unittest.TestCase):
         self.assertIn('disable-feature', body['status']['text'])
 
 
+class CheckFallbackTests(ProvisionCase):
+    """没有提权日志时 check() 必须回到真实探测，不能把用户锁死在“请先点启用”里。"""
+
+    def service(self, runner):
+        from src import sandbox_provision_api
+        return sandbox_provision_api.SandboxProvisionService(runner=runner, log_dir=self.tmp)
+
+    def test_enabled_without_log_reports_ok(self):
+        with self.patched_defaults():
+            result = self.service(make_runner(ENABLED_OUT)).check()
+        self.assertTrue(result['ok'])
+        self.assertEqual(result['state'], 'enabled')
+        self.assertNotIn('请先点', result['message'])
+        self.assertIn('创建隔离通道', result['message'])
+
+    def test_disabled_without_log_asks_to_enable(self):
+        with self.patched_defaults():
+            result = self.service(make_runner(DISABLED_OUT)).check()
+        self.assertFalse(result['ok'])
+        self.assertEqual(result['reason'], 'not_enabled')
+        self.assertIn('启用 Windows 沙盒', result['message'])
+
+    def test_unknown_without_log_keeps_enable_available(self):
+        with self.patched_defaults():
+            result = self.service(make_runner('', returncode=740)).check()
+        self.assertFalse(result['ok'])
+        self.assertEqual(result['reason'], 'dism_unavailable')
+        self.assertEqual(result['next_step'], 'enable')
+
+    def test_given_log_file_still_wins(self):
+        path = self.write_log('完成' + chr(10) + provision.EXIT_MARKER + ' 0')
+        with self.patched_defaults():
+            result = self.service(make_runner(DISABLED_OUT)).check(str(path))
+        self.assertTrue(result['ok'])
+        self.assertEqual(result['exit_code'], 0)
+
+
 def _load_panel():
     try:
         from src.gui.sandbox_provision_panel import SandboxProvisionPanel
@@ -389,9 +455,17 @@ class PanelTests(unittest.TestCase):
         panel.apply_status({'state': 'disabled', 'edition': '专业版', 'next_step': 'enable',
                             'message': '未启用', 'hint': '点启用'})
         self.assertTrue(panel.enable_button.isEnabled())
-        self.assertFalse(panel.recheck_button.isEnabled())
+        # “重新检测”是只读出口，任何状态都必须能点，否则用户会卡在“让你点启用但按钮是灰的”里。
+        self.assertTrue(panel.recheck_button.isEnabled())
         self.assertFalse(panel.channel_button.isEnabled())
         self.assertTrue(panel.rollback_button.isEnabled())
+
+    def test_channel_button_enabled_for_launch_step(self):
+        panel = self.make_panel()
+        panel.apply_status({'state': 'enabled', 'edition': '专业版', 'next_step': 'launch',
+                            'message': '已启用', 'hint': '打开沙盒'})
+        self.assertTrue(panel.channel_button.isEnabled())
+        self.assertFalse(panel.enable_button.isEnabled())
 
     def test_buttons_follow_create_channel_step(self):
         panel = self.make_panel()

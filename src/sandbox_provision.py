@@ -231,7 +231,8 @@ def _detect(runner, registry_reader, last_record):
     key = edition.casefold()
     supported_edition = (key in SUPPORTED_EDITIONS) if key else None
     wsb_exe = _wsb_exe_exists()
-    needs_reboot = isinstance(last_record, dict) and last_record.get('state') == 'pending_reboot'
+    needs_reboot = (isinstance(last_record, dict) and last_record.get('state') == 'pending_reboot'
+                    and not _rebooted_since(last_record))
     if supported_edition is False:
         return _result('unsupported', False, edition, '', wsb_exe, needs_reboot,
                        'unsupported_edition',
@@ -240,23 +241,24 @@ def _detect(runner, registry_reader, last_record):
     probe = _probe_feature(runner)
     feature = probe['state']
     if feature == 'Enabled':
-        next_step = 'reboot' if needs_reboot else 'launch'
+        next_step = 'launch'
         message = _edition_label(edition) + '上 Windows 沙盒功能已启用'
         hint = ('功能已生效：先打开 Windows 沙盒并在其中登录微信，再点“创建隔离通道”。'
-                if not needs_reboot else '功能已启用但仍需重启电脑才生效：请先重启，再点“我已重启，重新检测”。')
+                if not needs_reboot else
+                '功能已启用；建议重启电脑一次再建通道（更稳），也可以先直接点“创建隔离通道”试试。')
         return _result('enabled', True, edition, 'Enabled', wsb_exe, needs_reboot, 'enabled',
                        message, hint, next_step)
     if feature == 'Disabled':
         message = _edition_label(edition) + '上找到了 Windows 沙盒功能，但它是关闭状态'
         hint = ('点“启用 Windows 沙盒”，在管理员授权窗口点“是”；启用完成后需要重启电脑才生效。')
-        next_step = 'reboot' if needs_reboot else 'enable'
+        next_step = 'enable'
         return _result('disabled', True, edition, 'Disabled', wsb_exe, needs_reboot, 'disabled',
                        message, hint, next_step)
     if feature == 'Absent':
         message = '本机镜像里没有 Windows 沙盒组件（DISM 找不到 ' + FEATURE_NAME + '）'
         hint = ('点“启用 Windows 沙盒”让系统尝试补装；若报 0x800f0805 说明镜像被精简，'
                 '请用官方 ISO 修复或改用本机模式。')
-        next_step = 'reboot' if needs_reboot else 'enable'
+        next_step = 'enable'
         return _result('absent', True, edition, 'Absent', wsb_exe, needs_reboot, 'feature_absent',
                        message, hint, next_step)
     # 读不到 DISM 结果（最常见是没提权，dism 直接返回 740）：退回文件探测，但仍标 unknown。
@@ -281,6 +283,35 @@ def _explain_exit_code(code):
     if text is None:
         text = '启用失败（返回码 ' + str(value) + '）：请把这条日志发给维护者，或在管理员命令行手动执行启用命令'
     return text + '（原始返回码 ' + str(value) + ' / 0x' + format(unsigned, '08X') + '）'
+
+
+REBOOT_GRACE_SECONDS = 90.0
+
+
+def _system_boot_time():
+    """返回本次开机时刻（epoch 秒）；读不到返回 None。"""
+    try:
+        import ctypes
+        millis = ctypes.windll.kernel32.GetTickCount64()
+        return time.time() - float(millis) / 1000.0
+    except Exception:
+        return None
+
+
+def _rebooted_since(record):
+    """记录写着“待重启”，但电脑在写记录之后已经重启过，这条就不再算数。"""
+    if not isinstance(record, dict) or record.get('state') != 'pending_reboot':
+        return False
+    try:
+        updated = float(record.get('updated') or 0)
+    except (TypeError, ValueError):
+        return False
+    if updated <= 0:
+        return False
+    boot = _system_boot_time()
+    if boot is None:
+        return False
+    return updated + REBOOT_GRACE_SECONDS < boot
 
 
 def _stamp():
@@ -581,16 +612,14 @@ def status(runner=None, registry_reader=None, log_dir=None):
     needs_reboot = bool(probe.get('needs_reboot'))
     state = probe['state']
     if state == 'enabled':
-        next_step = 'reboot' if needs_reboot else 'create_channel'
+        next_step = 'create_channel'
     elif state == 'unsupported':
         next_step = 'none'
-    elif needs_reboot:
-        next_step = 'reboot'
     else:
         next_step = 'enable'
     message = probe['message']
     if needs_reboot and state != 'unsupported':
-        message += '；启用已经提交，需要重启电脑后才生效'
+        message += '；建议重启电脑一次后再用，也可以先点“创建隔离通道”试试'
     return {'ok': True, 'state': state, 'supported': probe['supported'],
             'edition': probe['edition'], 'feature': probe['feature'], 'wsb_exe': probe['wsb_exe'],
             'needs_reboot': needs_reboot, 'reason': probe['reason'], 'next_step': next_step,
@@ -681,7 +710,7 @@ def _create_channel(runtime_or_none, manager, runner):
     if state['state'] == 'unsupported':
         return {'ok': False, 'state': 'unsupported', 'reason': 'unsupported_edition',
                 'sandbox_id': '', 'channel_id': '', 'stage': '', 'message': state['message']}
-    if state.get('needs_reboot') or state.get('next_step') == 'reboot':
+    if state.get('needs_reboot'):
         return {'ok': False, 'state': 'needs_reboot', 'reason': 'needs_reboot',
                 'sandbox_id': '', 'channel_id': '', 'stage': '',
                 'message': 'Windows 沙盒功能已启用但需要重启电脑才生效：重启后再点“创建隔离通道”'}
