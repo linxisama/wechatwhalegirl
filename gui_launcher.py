@@ -81,6 +81,9 @@ def main() -> int:
     if len(sys.argv)>1 and sys.argv[1]=='--backend-worker':
         from src.desktop_startup import run_backend
         return run_backend(sys.argv[2:])
+    if len(sys.argv) > 1 and sys.argv[1] == '--sandbox-doctor':
+        from src.sandbox_doctor import main as doctor_main
+        return doctor_main(sys.argv[1:])
     if getattr(sys,'frozen',False) and not any(flag in sys.argv for flag in ('--gui-worker','--self-test','--verify-upgrade-data')):
         from src.desktop_startup import supervise
         return supervise(LOG_DIR,sys.argv[1:],notify='--desktop-check' not in sys.argv)

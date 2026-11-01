@@ -1,3 +1,11 @@
+## 1.3.79 沙盒环境诊断：一条命令把「这台机器为什么用不了沙盒」变成可回传的报告
+
+- 新增命令行 `--sandbox-doctor`：只读采集系统版本、`WindowsSandbox.exe`、`wsb.exe`、容器服务（CmService/vmcompute/hns）、`hcsdiag list`、DISM 功能状态与管理员权限，写成 UTF-8(BOM)+CRLF 的文本报告，默认落在桌面并自动打开。
+- 可选 `--probe-launch`：真的启动一次沙盒，看窗口有没有出现、映射目录里能不能拿到标记文件；探测结束用 WM_CLOSE 关掉自己打开的那个沙盒窗口，不在桌面留 VM。
+- 结论码六种，每条都带一句「怎么办」：`ok` / `no_sandbox_app`（没启用沙盒功能）/ `container_service_down`（容器服务没跑）/ `no_cli_but_app`（有沙盒程序但没有 wsb.exe）/ `sandbox_window_only`（窗口能起来但映射命令没生效）/ `sandbox_probe_inconclusive`（探测没看到窗口）。
+- 把 Win10 的事实写进结论：健康的 Win10 只有 `C:\Windows\System32\WindowsSandbox.exe`、没有 `wsb.exe`，隔离通道还需要「文件通道」后端（后续版本提供）；控制台本机模式不受影响，收发消息、插件、DSH 全部可用。
+- 诊断只读：唯一的写操作是自己的报告文件和 `%PUBLIC%\whale-doctor-*` 临时探测目录，不碰微信数据、不改配置。
+- 新增 `tests/test_sandbox_doctor_179.py` 13 例，锁定结论判定、报告格式、探测超时也会关窗口。
 ## 1.3.78 wsb.exe 解析器改问 Known Folder 与 PATH：环境变量被改写也不误报
 
 - 依据：1.3.77 用「干净数据目录」模拟新电脑时，把 LOCALAPPDATA 指到临时目录，兼容性自检立刻报「System32 与 WindowsApps 里都没有 wsb.exe 命令行」，可命令行其实能用。真实世界同样会发生：控制台被计划任务或服务拉起时，LOCALAPPDATA 会指向 systemprofile 或被启动器改写，于是自检把「能开沙盒」误报成「沙盒不可用」。
