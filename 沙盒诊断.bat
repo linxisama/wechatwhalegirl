@@ -5,9 +5,17 @@ set "EXE=%~dp0WhaleGirlWeChat.exe"
 if not exist "%EXE%" set "EXE=%LOCALAPPDATA%\Programs\WhaleGirlWeChat\WhaleGirlWeChat.exe"
 if not exist "%EXE%" set "EXE=%ProgramFiles%\WhaleGirlWeChat\WhaleGirlWeChat.exe"
 if not exist "%EXE%" (
-  echo 没找到 WhaleGirlWeChat.exe，请把本文件放到安装目录后重试。
+  echo [ERROR] WhaleGirlWeChat.exe not found next to this file.
+  echo Put this .bat into the install folder and run it again.
   pause
   exit /b 1
 )
-"%EXE%" --sandbox-doctor --probe-launch
+echo Running sandbox diagnosis. It takes 30-90 seconds.
+echo A report will open automatically when it finishes.
+echo.
+start /wait "" "%EXE%" --sandbox-doctor --probe-launch
+echo.
+echo Done. The report is sandbox-doctor.txt on your Desktop.
+echo If no report appeared, send the screenshot of this window back.
+timeout /t 8 >nul
 exit /b 0
