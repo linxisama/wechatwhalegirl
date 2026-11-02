@@ -72,6 +72,8 @@ class DialogueTab(QWidget):
         self.learning=LearningPanel(request);self.tabs.addTab(self.learning,'本地学习库')
         from .usage_panel import UsagePanel
         self.usage_panel=UsagePanel(request);self.tabs.addTab(self.usage_panel,'用量与记忆巡检')
+        from .send_panel import SendPanel
+        self.send_panel=SendPanel(request);self.tabs.addTab(self.send_panel,'发送诊断')
         self.tabs.setCurrentIndex(3)
         layout.addWidget(self.tabs,1)
         self.notice=QLabel('');self.notice.setWordWrap(True);self.notice.setTextFormat(Qt.TextFormat.PlainText);layout.addWidget(self.notice)

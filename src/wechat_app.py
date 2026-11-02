@@ -2597,6 +2597,15 @@ def create_app(runtime=None):
         path = app.state.bot.root / 'data/wechat-only/memory-guard.jsonl'
         return {'ok': True, 'summary': memory_guard.summary(path), 'items': memory_guard.recent(path, 20)}
 
+    @app.get('/api/send/history')
+    async def send_history(limit: int = 50):
+        """最近的发送阶段与失败记录（只读日志尾部，不落正文）。"""
+        require_bound(app.state.bot)
+        from . import logging_setup, send_history as send_history_mod
+        path = logging_setup.backend_log_path() or (app.state.bot.root / 'logs' / 'backend.log')
+        items = send_history_mod.recent(path, limit)
+        return {'ok': True, **send_history_mod.summarize(items), 'items': items}
+
     @app.middleware("http")
     async def local_admin(request: Request, call_next):
         """只允许本机访问：这个后端能操作微信，暴露到局域网等于把账号交出去。"""

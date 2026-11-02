@@ -1,3 +1,12 @@
+## 1.3.85 发送诊断（只读）
+
+- 控制台「对话与记忆」页新增第七个子页「发送诊断」（`src/gui/send_panel.py`，挂载点 `src/gui/dialogue_tab.py:76`）：上半是概览（日志尾部阶段/失败/耗时各多少条、失败码分布），中间是最近一次失败的中文原因与处理建议，下半是最近 50 条记录明细（阶段码、打码后的会话名、字数、通道、pid）。整页只读，没有重发、清空、重试入口。
+- 新增只读接口 `GET /api/send/history?limit=50`（`src/wechat_app.py:2600-2607`）：先过 `require_bound(app.state.bot)`，返回 `counts` / `failure_codes` / `last_failure` / `last_phase` / `last_timing` / `items`；`limit` 只接受 1..200，越界按 50 处理。路由数 178 → 179。
+- 代理桥接的只读动作表新增 `send.history`（→ `/api/send/history`，`src/agent_control.py:41`）；写入表一行未动。
+- 新增 `src/send_history.py`：`parse_line()` / `parse_lines()` / `recent()` / `summarize()` / `describe()` / `hint_for()`。只解析三类日志行——`send phase=…`、`send failed …`、`send timing …`；只读日志尾部（走 `jsonl_tail.tail_lines()`，日志再大也只读最后几千行），解析不出来就跳过，绝不抛。
+- 失败原因码给出中文与建议（`send_failed`、`blocked_by_window`、`foreground_lost`、`target_not_open`、`title_unverified`、`search_unavailable`、`auto_open_disabled`、`ocr_budget`、`ocr_empty`、`timeout`、`guia_unavailable`、`minimized` 等）；未知码原样显示，不猜。
+- 新增 `tests/test_send_history_185.py` 13 例与 `tests/test_send_panel_185.py` 9 例：三类行解析、坏数字归零、未知码、缺文件、越界 limit、只读尾部（让 `Path.read_text` 抛异常）、聚合计数与最近一条；面板侧覆盖只发一个 GET、成功/失败/抛错三种解锁、空状态、定时器只在可见时跑。
+- 这一版不改发送、接收、记忆与插件行为：面板只读日志尾部，不发消息、不清草稿、不改设置，也不写任何文件。
 ## 1.3.84 用量与记忆巡检面板（只读）+ 大 JSONL 流式读取
 
 - 控制台「对话与记忆」页新增子页「用量与记忆巡检」（`src/gui/usage_panel.py`，挂载点 `src/gui/dialogue_tab.py:74`）：上半是近 7 天 token 估算——总轮数、提示/回复 token、DSH 与本地兜底各几轮、最后一条时间；下半是记忆写入前的自检记录——总条数、需留意条数、五类判定码分布，以及最近 20 条的打码原文。整页只读，没有保存、删除、清空入口。

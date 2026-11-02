@@ -38,6 +38,7 @@ _READS = {
     'wechat.groups': '/api/wechat/groups', 'wechat.sessions': '/api/wechat/sessions',
     'weflow.config': '/api/weflow/config',
     'memory.guard': '/api/memory/guard', 'usage.report': '/api/usage/summary',
+    'send.history': '/api/send/history',
 }
 _WRITES = {
     'workspace.write': '/api/agent/workspace/note', 'workspace.remember': '/api/agent/workspace/memories',

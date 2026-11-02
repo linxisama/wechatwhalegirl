@@ -1,3 +1,9 @@
+## 1.3.85 发送诊断（只读）
+
+- 新增只读 GET `/api/send/history`：查询参数 `limit`（默认 50，只接受 1..200，越界按 50），先过 `require_bound(app.state.bot)`；响应 `{ok:true, counts:{phases,failures,timings}, failure_codes:{码:次数}, last_failure, last_phase, last_timing, items:[…]}`。`items` 里阶段行只有 `phase/who/len/reason/channel/pid`，失败行另有 `title/hint/text/advice`，耗时行是 `scope/metrics/total_ms`。`routes` 178 → 179。
+- 代理桥接只读动作表新增 `send.history` → `/api/send/history`（`src/agent_control.py:41`）。
+- 日志字段契约（1.3.11 起就有，本轮才被读）：`send phase=<码> who=<前 8 字> len=<正文字数> reason=<码> channel=uia|guia pid=<pid>`、`send failed channel=… reason=… who=… len=… title=… hint=… [foreground=…] pid=…`、`send timing guest|worker <k>_ms=…`。`who`/`title` 一律是打码后的名字，正文只以 `len=` 出现，解析层不还原、不再打码。
+- 解析纯本地、只读日志尾部（`jsonl_tail.tail_lines`），不调用微信、不写文件；任何一行格式不符只跳过该行。
 ## 1.3.84 用量与记忆巡检面板（只读）+ 大 JSONL 流式读取
 
 - 协议零变化：没有新增路由（`routes` 仍 178）、没有新增代理动作，`usage.report`（→ `/api/usage/summary`）与 `memory.guard`（→ `/api/memory/guard`）沿用 1.3.83 的映射。
