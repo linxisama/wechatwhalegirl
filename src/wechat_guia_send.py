@@ -307,6 +307,17 @@ _HANDLE_FORMATS = {2, 3, 9, 14}
 _PRIVATE_FORMAT_FLOOR = 0x0400
 
 
+def _exc_label(exc, limit=80):
+    """异常的人话标签：pywintypes.error 的类名就叫 error，光看名字等于没信息。"""
+    text = str(exc).strip().replace('\n', ' ')
+    name = type(exc).__name__
+    if not text:
+        return name
+    if len(text) > limit:
+        text = text[:limit] + '…'
+    return f'{name}({text})'
+
+
 def _is_win32_error(exc):
     """只有 Windows API 自己的错误才算「这个格式读不出来」；测试里的 TypeError/OSError 仍要原样上抛。"""
     try:
@@ -316,8 +327,43 @@ def _is_win32_error(exc):
     return isinstance(exc, pywintypes.error)
 
 
+# 1.3.86：剪贴板占用重试。真机 2026-10-31 20:48 两次发送的收尾都死在
+# pywintypes.error (5, 'OpenClipboard', '拒绝访问')——微信粘贴后会短暂持有剪贴板。
+# 有界重试几百毫秒就能过去，超过预算才允许判失败。
+CLIPBOARD_OPEN_BUDGET = 1.2
+CLIPBOARD_OPEN_FIRST_DELAY = 0.02
+CLIPBOARD_OPEN_MAX_DELAY = 0.16
+
+
+def _open_clipboard(win32clipboard, budget=None, sleep=None, clock=None):
+    """OpenClipboard 有界重试：被别的程序占住时不要立刻把整条回复判死。
+
+    只重试 Windows API 自己的错误；替身/编程错误（TypeError 等）仍原样上抛，
+    否则真正的 bug 会被当成环境问题掩掉。
+    """
+    budget = CLIPBOARD_OPEN_BUDGET if budget is None else budget
+    sleep = sleep or time.sleep
+    clock = clock or time.perf_counter
+    deadline = clock() + max(0.0, budget)
+    delay = CLIPBOARD_OPEN_FIRST_DELAY
+    while True:
+        try:
+            win32clipboard.OpenClipboard()
+            return
+        except Exception as exc:
+            if not _is_win32_error(exc) or clock() >= deadline:
+                raise
+            sleep(delay)
+            delay = min(delay * 2, CLIPBOARD_OPEN_MAX_DELAY)
+
+
 class _Clipboard:
     """先物化原剪贴板字节；存不住的格式记名跳过，绝不让剪贴板挡住房回复发送。"""
+
+    def __init__(self):
+        self.skipped = ()
+        self.partial = False
+        self.restore_error = ''
 
     def snapshot(self):
         """物化原剪贴板字节（best-effort）：存不住的格式记进 self.skipped，照常返回已存部分。
@@ -330,7 +376,7 @@ class _Clipboard:
         丢一份远好过机器人整条回复发不出去（真机 20:48 / 22:28 两次都是被剪贴板挡住的）。
         """
         import win32clipboard
-        win32clipboard.OpenClipboard()
+        _open_clipboard(win32clipboard)
         try:
             items = []
             formats = set()
@@ -374,7 +420,13 @@ class _Clipboard:
 
     def copy(self, text):
         import win32clipboard
-        win32clipboard.OpenClipboard()
+        try:
+            _open_clipboard(win32clipboard)
+        except Exception as exc:
+            if _is_win32_error(exc):
+                raise _GuardFailed('send_failed',
+                                   '系统剪贴板被其它程序占用（OpenClipboard 被拒绝），本次未输入正文') from exc
+            raise
         try:
             win32clipboard.EmptyClipboard()
             win32clipboard.SetClipboardText(text, win32clipboard.CF_UNICODETEXT)
@@ -382,18 +434,30 @@ class _Clipboard:
             win32clipboard.CloseClipboard()
 
     def restore(self, snapshot):
+        """把快照写回剪贴板：这是清理动作，永远不抛。
+
+        真机 20:48 两次发送都是正文已粘好、回读也通过了，最后卡在 finally 里的 restore
+        抛 (5,'OpenClipboard','拒绝访问')，把「已确认清空前放弃」整条判成通道内部异常。
+        剪贴板是用户的临时数据，恢复失败只该记一笔，不该改变这条回复的结论。
+        """
+        self.restore_error = ''
         import win32clipboard
-        win32clipboard.OpenClipboard()
         try:
-            win32clipboard.EmptyClipboard()
-            for fmt, value in snapshot:
-                win32clipboard.SetClipboardData(fmt, value)
-        finally:
-            win32clipboard.CloseClipboard()
+            _open_clipboard(win32clipboard)
+            try:
+                win32clipboard.EmptyClipboard()
+                for fmt, value in snapshot or ():
+                    win32clipboard.SetClipboardData(fmt, value)
+            finally:
+                win32clipboard.CloseClipboard()
+            return True
+        except Exception as exc:
+            self.restore_error = _exc_label(exc)
+            return False
 
     def text(self):
         import win32clipboard
-        win32clipboard.OpenClipboard()
+        _open_clipboard(win32clipboard)
         try:
             if not win32clipboard.IsClipboardFormatAvailable(win32clipboard.CF_UNICODETEXT):
                 return None
@@ -1657,8 +1721,8 @@ class GuiaChannel:
                 f'point_pid={self._point_pid} foreground_pid={self._foreground_pid} '
                 'hint=通道内部异常，本次不重发'))
             return _fail('send_failed',
-                         (f'{type(exc).__name__}；结果不确定，本次不重发；请核对聊天记录' if submitted else
-                          f'{type(exc).__name__}；本次未按发送键，请核对微信草稿'),
+                         (f'{_exc_label(exc)}；结果不确定，本次不重发；请核对聊天记录' if submitted else
+                          f'{_exc_label(exc)}；本次未按发送键，请核对微信草稿'),
                          uncertain=submitted)
         finally:
             # 正文已经粘进输入框、发送键又没按下去时，必须把它清回去：否则下一次发送的

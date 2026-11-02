@@ -1,3 +1,10 @@
+## 1.3.86 剪贴板占用重试与恢复降级
+
+- 发送通道契约不变：一次发送最多按一次发送键、失败绝不重发；本版只改「怎么打开剪贴板」与「清理动作的语义」。
+- `_Clipboard.restore()` 不再抛异常（失败只记 `restore_error`）：`_paste` / `_readback` 的 `finally` 里恢复剪贴板，不会再因为剪贴板被别人占住而把「未按发送键」翻成「结果不确定」。
+- `snapshot`/`copy`/`text` 统一走 `_open_clipboard()`：预算 `CLIPBOARD_OPEN_BUDGET=1.2` 秒（首次 0.02 秒、翻倍至 0.16 秒），超预算才失败；占用预算计入发送总时限，`DEFAULT_TIMEOUT` 未改。
+- 失败文案：剪贴板占用超预算 → `reason=send_failed`、`系统剪贴板被其它程序占用（OpenClipboard 被拒绝），本次未输入正文`；内部异常仍写 `send failed channel=guia reason=send_failed ... hint=通道内部异常` 并带堆栈，用户可见部分改为 `_exc_label` 形式。
+
 ## 1.3.85 发送诊断（只读）
 
 - 新增只读 GET `/api/send/history`：查询参数 `limit`（默认 50，只接受 1..200，越界按 50），先过 `require_bound(app.state.bot)`；响应 `{ok:true, counts:{phases,failures,timings}, failure_codes:{码:次数}, last_failure, last_phase, last_timing, items:[…]}`。`items` 里阶段行只有 `phase/who/len/reason/channel/pid`，失败行另有 `title/hint/text/advice`，耗时行是 `scope/metrics/total_ms`。`routes` 178 → 179。

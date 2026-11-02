@@ -1,3 +1,12 @@
+## 1.3.86 剪贴板占用重试与恢复降级
+
+- `src/wechat_guia_send.py` 新增 `_open_clipboard(win32clipboard, budget=None, sleep=None, clock=None)`：`snapshot`/`copy`/`text` 遇到 `pywintypes.error (5, 'OpenClipboard', '拒绝访问')` 时有界重试（`CLIPBOARD_OPEN_BUDGET=1.2` 秒、首次间隔 `0.02` 秒、逐次翻倍至 `0.16` 秒），只重试 Windows API 自己的错误，替身/编程错误仍原样上抛。
+- `copy()` 在占用超预算时抛 `_GuardFailed('send_failed', '系统剪贴板被其它程序占用（OpenClipboard 被拒绝），本次未输入正文')`，不再以「通道内部异常」收场；此时一个字符都没粘进输入框。
+- `restore()` 改为清理动作、永不抛：失败只写 `self.restore_error`（`_exc_label` 标签）并返回 False。真机 2026-10-31 20:48:26 / 20:48:49 两次发送的正文已粘好、回读也通过，最后死在 `finally` 里的 `restore` → 整条回复被判「通道内部异常」；剪贴板是用户的临时数据，恢复失败不该改变这条回复的结论。`_Clipboard` 同时补上 `__init__`（`skipped`/`partial`/`restore_error`）。
+- 新增 `_exc_label(exc, limit=80)`：`pywintypes.error` 的类名就叫 `error`，光看名字等于没信息；内部异常的用户可见文案改为带异常正文（`error((5, 'OpenClipboard', '拒绝访问。'))；本次未按发送键，请核对微信草稿`）。
+- 新增 `tests/test_clipboard_retry_186.py` 12 例：占用重试、预算耗尽才放弃、编程错误不重试、`copy` 转 `send_failed`、`restore` 绝不抛、空快照仍清空、`text()` 重试、异常标签截断。
+- 这一版不改发送键、标题核验、发送时限与重发策略：仍是唯一一次按键、失败绝不重发，`routes` 仍 179。
+
 ## 1.3.85 发送诊断（只读）
 
 - 控制台「对话与记忆」页新增第七个子页「发送诊断」（`src/gui/send_panel.py`，挂载点 `src/gui/dialogue_tab.py:76`）：上半是概览（日志尾部阶段/失败/耗时各多少条、失败码分布），中间是最近一次失败的中文原因与处理建议，下半是最近 50 条记录明细（阶段码、打码后的会话名、字数、通道、pid）。整页只读，没有重发、清空、重试入口。
