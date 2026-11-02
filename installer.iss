@@ -68,6 +68,7 @@ Source: "启动（管理员）.cmd"; DestDir: "{app}"; Flags: ignoreversion
 Source: "清理占用端口的旧后台.bat"; DestDir: "{app}"; Flags: ignoreversion
 ; 沙盒环境诊断（另一台电脑用不了沙盒时，跑它把事实拿回来）
 Source: "沙盒诊断.bat"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
+Source: "机器体检.bat"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 Source: "tools\free_port.ps1"; DestDir: "{app}\tools"; Flags: ignoreversion
 ; 随包文档，方便用户装完就能看
 Source: "README.md"; DestDir: "{app}"; Flags: ignoreversion

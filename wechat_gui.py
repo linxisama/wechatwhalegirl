@@ -6027,6 +6027,10 @@ if __name__ == "__main__":
     if "--sandbox-doctor" in sys.argv:
         from src.sandbox_doctor import main as sandbox_doctor_main
         sys.exit(sandbox_doctor_main())
+    if "--machine-check" in sys.argv:
+        from src.machine_check import main as machine_check_main
+        args = sys.argv[sys.argv.index("--machine-check") + 1:]
+        sys.exit(machine_check_main(args))
     if "--self-test" in sys.argv:
         from src.gui.smoke import run
         output = Path(sys.argv[sys.argv.index("--self-test") + 1])

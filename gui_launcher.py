@@ -84,6 +84,9 @@ def main() -> int:
     if len(sys.argv) > 1 and sys.argv[1] == '--sandbox-doctor':
         from src.sandbox_doctor import main as doctor_main
         return doctor_main(sys.argv[1:])
+    if len(sys.argv) > 1 and sys.argv[1] == '--machine-check':
+        from src.machine_check import main as machine_main
+        return machine_main(sys.argv[2:])
     if getattr(sys,'frozen',False) and not any(flag in sys.argv for flag in ('--gui-worker','--self-test','--verify-upgrade-data')):
         from src.desktop_startup import supervise
         return supervise(LOG_DIR,sys.argv[1:],notify='--desktop-check' not in sys.argv)
@@ -111,7 +114,7 @@ if __name__ == "__main__":
         raise
     except BaseException:
         traceback.print_exc(file=log)
-        for flag in ('--self-test','--verify-upgrade-data','--desktop-check','--native-check'):
+        for flag in ('--self-test','--verify-upgrade-data','--desktop-check','--native-check','--machine-check'):
             if flag in sys.argv:
                 Path(sys.argv[sys.argv.index(flag) + 1]).with_suffix(".error.txt").write_text(
                     traceback.format_exc(), encoding="utf-8")
