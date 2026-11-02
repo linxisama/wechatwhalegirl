@@ -80,9 +80,18 @@ class SandboxProvisionService:
                                     + ('；' + str(status.get('hint') or '') if status.get('hint') else '')})
             return base
         if state in ('disabled', 'absent'):
-            base.update({'ok': False, 'reason': 'not_enabled', 'next_step': 'enable',
-                         'message': '本机还没启用 Windows 沙盒：点“启用 Windows 沙盒”，'
-                                    '在管理员授权窗口点“是”，完成后重启电脑一次'})
+            default_text = ('本机还没启用 Windows 沙盒：点“启用 Windows 沙盒”，'
+                            '在管理员授权窗口点“是”，完成后重启电脑一次')
+            if status.get('wsb_exe') is False:
+                # 1.3.82：Windows 10 没有 wsb.exe，点了“启用”也建不了通道；这时要说清楚
+                # 该用本机模式，而不是把用户推进一次白重启。文案由 status() 统一给。
+                message = str(status.get('message') or '') or default_text
+                step = str(status.get('next_step') or 'manual')
+            else:
+                message = default_text
+                step = 'enable'
+            base.update({'ok': False, 'reason': 'not_enabled', 'next_step': step,
+                         'message': message})
             return base
         if state == 'unsupported':
             base.update({'ok': False, 'reason': 'unsupported_edition', 'next_step': 'none',

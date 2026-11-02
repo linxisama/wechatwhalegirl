@@ -12,7 +12,8 @@ import time
 
 from .layout_hints import explain_composer
 from .wechat_capture import grab_render, grab_screen
-from .wechat_layout import composer_control_pixels, inspect_composer, draft_state, title_region
+from .wechat_layout import (composer_control_pixels, draft_state, inspect_composer,
+                            title_region, title_region_fallback)
 from .wechat_ocr_labels import locate_send_button
 
 
@@ -59,6 +60,19 @@ _MEDIUM_TITLE_BINARIZED_PASSES = ((2.5, 150, 32, 'nearest'), (3, 150, 64, 'neare
 # 一次标题读取的总预算（秒）：两族最多六个变体，单次 LocalOCR 上限 5 秒，排满会顶到十几秒，
 # 把发送链路既有的 18/24/25 秒时限挤掉。超预算当场放弃，绝不返回没核实完的标题。
 TITLE_READ_BUDGET = 8.0
+# 小字号档（墨迹高 8-13px）：微信 4.1.15.13 起标题条缩到 12px，既不在 16-24 的中等字号
+# 区间、也不是旧表的 18px 帧，于是中表三族与旧表在这版微信上全族读不出（真机回包
+# 2026-11-02：title 空 → 发送恒 refuse）。本表在回包帧上逐变体实测（真 LocalOCR）：
+# (2,140)(2,150)(3,150) 三份都完整读出真值；而 (2.5,140)(2.5,150)(2.5,160)(2.5,170)
+# (3,160)(2.5,190) 读成错字、(2,190) 甚至 0 行 —— 错字照样能过只抓漏字的完整性检查，
+# 所以仍要求族内三份逐字一致，主族只放落在三个不同倍率/阈值上的实测组合。
+_SMALL_TITLE_PASSES = ((2, 140, 8, 'nearest'), (2, 150, 8, 'nearest'),
+                       (3, 150, 8, 'nearest'))
+# 回退族换重采样方式（三份都带 8px 白边）：同一帧上 (3,140) NEAREST、(4,150) NEAREST、
+# (2.5,None) LANCZOS 也都完整读出真值。与主族不共享任何一组参数，主族的像素前提不成立
+# 时才轮到它，同样要求三份逐字一致。
+_SMALL_TITLE_FALLBACK_PASSES = ((3, 140, 8, 'nearest'), (4, 150, 8, 'nearest'),
+                                (2.5, None, 8, 'smooth'))
 
 
 def _pass_variants(passes):
@@ -72,6 +86,9 @@ def _title_pass_families(passes):
         return (('medium', _pass_variants(_MEDIUM_TITLE_PASSES)),
                 ('medium_fallback', _pass_variants(_MEDIUM_TITLE_FALLBACK_PASSES)),
                 ('medium_binarized', _pass_variants(_MEDIUM_TITLE_BINARIZED_PASSES)))
+    if passes is _SMALL_TITLE_PASSES:
+        return (('small', _pass_variants(_SMALL_TITLE_PASSES)),
+                ('small_fallback', _pass_variants(_SMALL_TITLE_FALLBACK_PASSES)))
     return (('legacy', _pass_variants(passes)),)
 
 
@@ -89,8 +106,13 @@ def _title_passes(frame, ink):
     with frame.crop(ink).convert('RGB') as crop, mark_mask(crop) as mask:
         box = mask.getbbox()
     height = box[3] - box[1] if box else 0
-    return (_MEDIUM_TITLE_PASSES if 16 <= height <= 24 else
-            tuple((s, t, 0) for s, t in _TITLE_PASSES)), height
+    if 16 <= height <= 24:
+        return _MEDIUM_TITLE_PASSES, height
+    # 14-15px 仍归旧表：旧表是 14-18px 帧上实测出来的，没测过的更小字号不往它身上塞；
+    # 4.1.15.13 的 12px 标题条由小字号档的三份实测变体负责。
+    if 8 <= height <= 13:
+        return _SMALL_TITLE_PASSES, height
+    return tuple((s, t, 0) for s, t in _TITLE_PASSES), height
 
 
 def _title_words(rows):
@@ -171,6 +193,7 @@ def readonly_gui_class(base):
             self._pixel_frame_proof = None
             self._pixel_title_region = None
             self._pixel_title_region_key = None
+            self._pixel_title_region_source = None
             super().__init__(hwnd=hwnd, calibrate=False)
 
         def _load_layout(self):
@@ -272,15 +295,24 @@ def readonly_gui_class(base):
             为什么可以复用：标题条几何只由面板竖线与标题下沿横线决定，两条线都在正文框
             之外，而 _composer_fingerprint 已经把"正文框外全部像素 + 窗口矩形"折进 sha256；
             指纹相同即意味着标题条像素逐字节未变，扫出来的区域必然一样。窗口移动/缩放、
-            分隔线变化、标题换字都会改指纹，这里随即重扫。没有唯一分隔线时照旧返回 None，
-            调用方该报错还报错。
+            分隔线变化、标题换字都会改指纹，这里随即重扫。没有唯一分隔线时先问
+            title_region_fallback（无分隔线版式），它也给不出证据才返回 None，调用方该报错还报错。
             """
             proof = self._pixel_frame_proof
             key = (proof, int(info['pane_left']))
             if proof is not None and key == self._pixel_title_region_key:
                 return self._pixel_title_region
             region = title_region(frame, info['pane_left'])
+            source = 'divider'
+            if region is None:
+                # 无分隔线版式（微信 4.1.15.13 起标题栏与正文同为纯白）：没有与面板竖线
+                # 相接的横线可证，退回「面板竖线起点 + 面板内最靠上的一段标题墨迹」。
+                # 只换定位证据，不放松闸门：带偏就只会读到别的字，随后照旧拒绝发送。
+                region = title_region_fallback(frame, info['pane_left'],
+                                               bottom_limit=int(info['draft_box'][1]) - 4)
+                source = 'header_ink'
             self._pixel_title_region, self._pixel_title_region_key = region, key
+            self._pixel_title_region_source = source
             return region
 
         def readonly_ready(self):
@@ -288,7 +320,7 @@ def readonly_gui_class(base):
             with frame:
                 info = self._inspect_composer(frame, geometry)
                 if self._title_region_cached(frame, info) is None:
-                    raise RuntimeError('未确认标题栏与正文之间的分隔线')
+                    raise RuntimeError('未确认聊天标题栏区域：既没有标题分隔线，也没有可证的标题行')
             return True
 
         def get_input_box(self):
@@ -534,7 +566,9 @@ def readonly_gui_class(base):
                 ink = _title_ink_region(frame, region)
                 passes, glyph_height = _title_passes(frame, ink)
                 self._pixel_title_evidence['glyph_height'] = glyph_height
-                self._pixel_title_evidence['profile'] = 'medium' if passes is _MEDIUM_TITLE_PASSES else 'legacy'
+                self._pixel_title_evidence['profile'] = ('medium' if passes is _MEDIUM_TITLE_PASSES
+                                                        else 'small' if passes is _SMALL_TITLE_PASSES
+                                                        else 'legacy')
                 deadline = time.monotonic() + _title_read_budget()
                 outcomes = []
                 # 分级信任：族内三份完整读数一致才采信，整族作废才换下一族。全程不接收、
@@ -603,7 +637,7 @@ def readonly_gui_class(base):
                 info = self._inspect_composer(frame, geometry)
                 region = self._title_region_cached(frame, info)
                 if region is None:
-                    raise RuntimeError('未确认标题栏与正文之间的分隔线')
+                    raise RuntimeError('未确认聊天标题栏区域：既没有标题分隔线，也没有可证的标题行')
                 return self._title_band_signature(frame, region, geometry)
 
         @staticmethod

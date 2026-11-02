@@ -583,6 +583,10 @@ class GuiaChannel:
         self._press_ink = None   # 按下发送键前那一帧的墨迹量，供按键后确认清空
         self._title_cache = None  # 已核验标题 + 当帧标题条指纹；只在单次发送内有效
         self._body_len = 0
+        # 1.3.82：Ctrl+F 抢不到搜索框时（微信 4.1.15 已知）在进程内停用自动打开，
+        # 只活到本进程退出，不落盘——升级微信后自然恢复，不会永久坑住用户。
+        self._auto_open_disabled = False
+        self._auto_open_note = ''
 
     # ---------------------------------------------------------------
     # 通道对象
@@ -1341,6 +1345,13 @@ class GuiaChannel:
         if not auto_open_chat_enabled():
             return _fail('target_not_open',
                          f'当前不是「{target}」会话，且 {AUTO_OPEN_CHAT_ENV}=0 关了自动打开；请手动点开该会话')
+        if self._auto_open_disabled:
+            # 上一次已经证明这版微信的搜索框抢不到焦点：再按一次 Ctrl+F / Ctrl+V 只会把会话名
+            # 又打进正文框，毫无收益，所以直接拒绝，一个键都不发。
+            note = self._auto_open_note or '上一次自动打开失败'
+            return _fail('target_not_open',
+                         f'当前不是「{target}」会话；本进程已停用自动打开（{note}），'
+                         f'请手动点开该会话后再让机器人回复')
         try:
             if not self._foreground(gui):
                 return _fail('guia_unavailable', '无法把微信窗口置前，本次未尝试打开会话')
@@ -1366,8 +1377,25 @@ class GuiaChannel:
                 _tap_key(user32, 0x2E)           # Delete
                 _tap_key(user32, 0x1B)           # Esc
                 log_send_phase('guia_open_chat', target, 0, reason='search_unavailable', channel='guia')
-                return _fail('guia_unavailable',
-                             '搜索框没有拿到焦点（会话名落进了输入框，已清掉），本次未打开会话')
+                # 1.3.82：搜索框没抢到焦点不等于「没法打开」——用户可能在这半秒里自己点开了
+                # 目标会话。清完框再只读核一次标题，已经是目标会话就直接当成功返回，省一次失败。
+                recovered = ''
+                try:
+                    recovered = self._verified_title(gui, deadline)
+                except Exception:
+                    recovered = ''
+                if self.title_matches(recovered, target):
+                    log_send_phase('guia_open_chat', target, 0, '搜索框未聚焦，但当前已是目标会话', 'guia')
+                    mark_send_phase('guia_open_chat')
+                    self._title = recovered
+                    return None
+                self._auto_open_disabled = True
+                self._auto_open_note = '这版微信不响应 Ctrl+F 搜索'
+                log_send_phase('guia_open_chat', target, 0, reason='auto_open_disabled', channel='guia')
+                return _fail('target_not_open',
+                             '搜索框没有拿到焦点（会话名落进了输入框，已清掉）；这版微信可能不响应 '
+                             'Ctrl+F（4.1.15 已知），已停用自动打开。请先手动点开'
+                             f'「{target}」，再让机器人回复')
             _tap_key(user32, 0x0D)               # Enter：打开第一条搜索结果
             self._sleep(OPEN_CHAT_RESULT_WAIT)
             title = self._verified_title(gui, deadline)

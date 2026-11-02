@@ -406,3 +406,86 @@ def title_region(image, pane_left):
             return None
     # 窗口最小化/关闭按钮处于右侧，不能参与标题行选择。
     return (pane_left + 6, top, pane_left + int((width - pane_left) * .60), bottom)
+
+
+# --- 无分隔线版式（微信 4.1.15.13 起）的标题带定位 ---------------------------------
+# 4.1.15.13 的标题栏与正文同为纯白 (250,250,250)，标题与正文之间没有 1px 分隔线，
+# title_region() 要求的那条「与面板竖线相接的横线」根本不存在（真机回包 2026-11-02），
+# 于是标题永远读不到、发送闸门恒 refuse。这里改用两条纯像素事实定位标题带：
+#   1) 面板竖线的起点：聊天面板从这一行开始画，标题条不可能在它上面；
+#   2) 面板内最靠上的一段文字墨迹：标题是面板里最上面的那行字。
+# 两条都是几何/像素证据，不猜会话名；带偏只会读到别的字，调用方随后拒绝发送。
+HEADER_SCAN_ROWS = 360          # 只在前 360 行找面板起点：再往下是消息区，不是标题栏
+HEADER_DIVIDER_MIN_ROWS = 60    # 面板竖线至少连续 60 行才认，避免拿图标边框当面板边
+HEADER_TITLE_INK_MIN = 3        # 一行至少 3 个墨迹像素才算一行字（1-2 个是抗锯齿噪点）
+HEADER_RUN_HEIGHT = (8, 34)     # 标题墨迹高度区间：小于 8 是噪点，大于 34 是多行正文
+HEADER_LEFT_SLACK = 120         # 标题必须贴着面板左边（头像列之外），否则是消息预览
+HEADER_WIDTH_RATIO = .55        # 标题宽度不超过面板宽的一半：更长的是正文/通知
+
+
+def _divider_top(pixels, width, height, pane_left):
+    """面板竖线的第一个连续行；返回 None 表示这一帧没有可证的面板竖线。"""
+    rows = [y for y in range(3, min(height - 3, HEADER_SCAN_ROWS))
+            if _edge_at(pixels[pane_left - 2, y], pixels[pane_left, y], pixels[pane_left + 2, y])]
+    for start, end, support in _runs(rows, step=1, gap=3):
+        if end - start >= HEADER_DIVIDER_MIN_ROWS and support >= .80:
+            return start
+    return None
+
+
+def _ink_bands(pixels, left, right, top, bottom):
+    """面板内的墨迹行段（按行聚合，非纯白且足够暗的像素计为墨迹）。"""
+    bands, current = [], None
+    for y in range(top, bottom):
+        count = sum(1 for x in range(left, right) if sum(pixels[x, y]) <= 600)
+        if count >= HEADER_TITLE_INK_MIN:
+            current = [y, y] if current is None else [current[0], y]
+        elif current is not None:
+            bands.append((current[0], current[1]))
+            current = None
+    if current is not None:
+        bands.append((current[0], current[1]))
+    return bands
+
+
+def title_region_fallback(image, pane_left, bottom_limit=None):
+    """无分隔线版式的标题带；只给像素证据，不接收、不比较期望会话名。
+
+    返回 (left, top, right, bottom)，与 title_region() 同一坐标系（图像相对、右下开区间）；
+    定位不出唯一证据时返回 None，调用方保持原有拒绝路径。
+    """
+    width, height = image.size
+    if not 0 < pane_left < width - 120:
+        return None
+    limit = height if bottom_limit is None else min(int(bottom_limit), height)
+    with image.convert('RGB') as rgb:
+        pixels = rgb.load()
+        top = _divider_top(pixels, width, height, pane_left)
+        if top is None or limit - top < 20:
+            return None
+        left = pane_left + 4
+        right = pane_left + int((width - pane_left) * .60)
+        if right - left < 60:
+            return None
+        band = None
+        for start, end in _ink_bands(pixels, left, right, top + 2, limit):
+            if not HEADER_RUN_HEIGHT[0] <= end - start + 1 <= HEADER_RUN_HEIGHT[1]:
+                continue
+            start = max(start, top + 2)
+            xs = [x for y in range(start, end + 1) for x in range(left, right)
+                  if sum(pixels[x, y]) <= 600]
+            if not xs:
+                continue
+            # xs 是按行展开的，首尾元素只是「第一行的最左」和「最后一行的最右」，
+            # 必须真取极值，否则多行墨迹（如通知条 + 标题）会被当成窄标题放过。
+            x_min, x_max = min(xs), max(xs)
+            if x_min > left + HEADER_LEFT_SLACK:
+                continue
+            if x_max - x_min > (right - left) * HEADER_WIDTH_RATIO:
+                continue
+            band = (left, max(top + 1, start - 8), right, min(limit, end + 8))
+            break
+    # 带宽可能被 bottom_limit 截短（输入框就在标题下面），只按墨迹本身的高度兜底。
+    if band is None or band[3] - band[1] < HEADER_RUN_HEIGHT[0]:
+        return None
+    return band

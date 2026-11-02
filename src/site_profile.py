@@ -12,8 +12,10 @@
 import ctypes
 import os
 import platform
+import re
 import shutil
 import socket
+import subprocess
 import sys
 import time
 import json
@@ -511,6 +513,46 @@ def _port_free(port):
         probe.close()
 
 
+EXCLUDED_RANGE_TIMEOUT = 2.0
+_EXCLUDED_LINE = re.compile(r'^\s*(\d{2,5})\s+(\d{2,5})\s*$')
+
+
+def excluded_port_ranges(timeout=EXCLUDED_RANGE_TIMEOUT):
+    """读出 Windows 自己预留的 TCP 端口段（netsh int ipv4 show excludedportrange）。
+
+    这些段是 Hyper-V / WinNAT 动态预留的：既不响应 HTTP，也 bind 不上，任务管理器里又找不到
+    占用的进程。不单独识别的话，用户只会看到「被别的进程占着」，怎么关都关不掉（1.3.81 回包
+    里对方机器的 8091 就落在 8023-8122 这段里）。命令不存在、超时、输出形状不对一律返回 []，
+    探测失败不能变成误报。
+    """
+    try:
+        done = subprocess.run(
+            ['netsh', 'int', 'ipv4', 'show', 'excludedportrange', 'protocol=tcp'],
+            capture_output=True, timeout=timeout, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return []
+    out = (done.stdout or b'').decode('utf-8', 'replace')
+    ranges = []
+    for line in out.splitlines():
+        match = _EXCLUDED_LINE.match(line)
+        if not match:
+            continue
+        start, end = int(match.group(1)), int(match.group(2))
+        if 0 < start <= end <= 65535:
+            ranges.append((start, end))
+    return ranges
+
+
+def port_in_reserved(port, ranges=None):
+    """端口落在 Windows 预留段里就返回那一段 (start, end)，否则 None。"""
+    if ranges is None:
+        ranges = excluded_port_ranges()
+    for start, end in ranges or ():
+        if start <= int(port) <= end:
+            return (start, end)
+    return None
+
+
 def _probe_port():
     port = int(PORT)
     identity = _runtime_identity(port)
@@ -521,6 +563,17 @@ def _probe_port():
     if ours:
         return _item('port', 'ok', f'{port} 是本控制台后台在用（v{identity.get("version")}）', data)
     if not free:
+        # 先分清「Windows 预留段」和「真被别人占着」：前者关不掉占用进程，给的建议完全不同。
+        ranges = excluded_port_ranges()
+        data['excluded_ranges'] = [[start, end] for start, end in ranges]
+        reserved = port_in_reserved(port, ranges)
+        if reserved:
+            data['reserved_range'] = [reserved[0], reserved[1]]
+            return _item('port', 'warn',
+                         f'{port} 落在 Windows 预留端口段 {reserved[0]}-{reserved[1]} 里'
+                         '（Hyper-V/WinNAT 动态预留，不是普通程序占用）；以管理员执行 '
+                         'net stop winnat 再 net start winnat 即可放出来，或在设置里把控制台端口换到别的号',
+                         data)
         return _item('port', 'warn',
                      f'{port} 被别的进程占着、又不像本控制台后台；先关掉占用者，否则后台起不来', data)
     return _item('port', 'ok', f'{port} 空闲，后台可以正常监听', data)

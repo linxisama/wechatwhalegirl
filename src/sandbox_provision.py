@@ -691,19 +691,31 @@ def status(runner=None, registry_reader=None, log_dir=None):
                 'hint': '可以照常点“启用 Windows 沙盒”，DISM 对已启用的机器不会重复安装。'}
     needs_reboot = bool(probe.get('needs_reboot'))
     state = probe['state']
+    wsb_exe = bool(probe.get('wsb_exe'))
     if state == 'enabled':
         next_step = 'create_channel'
     elif state == 'unsupported':
         next_step = 'none'
+    elif not wsb_exe and state in ('disabled', 'absent'):
+        # 1.3.82：Windows 10 实测只带 WindowsSandbox.exe、没有 wsb.exe 命令行。这种机器就算把
+        # 功能启用也建不了隔离通道，再引导用户去点“启用”只是白折腾一次重启。
+        next_step = 'manual'
     else:
         next_step = 'enable'
     message = probe['message']
+    hint = probe['hint']
+    if state in ('disabled', 'absent') and not wsb_exe:
+        edition = str(probe.get('edition') or '')
+        where = '这台机器（' + edition + '）' if edition else '这台机器'
+        message = (where + '没有 wsb.exe 命令行（Windows 10 只带 WindowsSandbox.exe），'
+                   '自动建隔离通道用不了，启用沙盒也解决不了；请直接用本机模式')
+        hint = _no_cli_hint()
     if needs_reboot and state != 'unsupported':
         message += '；建议重启电脑一次后再用，也可以先点“创建隔离通道”试试'
     return {'ok': True, 'state': state, 'supported': probe['supported'],
             'edition': probe['edition'], 'feature': probe['feature'], 'wsb_exe': probe['wsb_exe'],
             'needs_reboot': needs_reboot, 'reason': probe['reason'], 'next_step': next_step,
-            'message': message, 'hint': probe['hint'], 'log_path': str(record.get('log_path') or ''),
+            'message': message, 'hint': hint, 'log_path': str(record.get('log_path') or ''),
             'last_enable': _last_enable_view(record)}
 
 
@@ -795,6 +807,15 @@ def _create_channel(runtime_or_none, manager, runner):
                 'sandbox_id': '', 'channel_id': '', 'stage': '',
                 'message': 'Windows 沙盒功能已启用但需要重启电脑才生效：重启后再点“创建隔离通道”'}
     if state['state'] != 'enabled':
+        if not state.get('wsb_exe'):
+            # 没有 wsb.exe 的机器（Windows 10 19045 实测）根本没有自动建通道的能力，
+            # 让用户去“启用沙盒再重启”只会再来一次失望。
+            edition = str(state.get('edition') or '')
+            where = '这台机器（' + edition + '）' if edition else '这台机器'
+            return {'ok': False, 'state': 'no_cli', 'reason': 'no_cli',
+                    'sandbox_id': '', 'channel_id': '', 'stage': '',
+                    'message': where + '没有 wsb.exe 命令行（Windows 10 只带 WindowsSandbox.exe），'
+                               '建不了隔离通道；请改用本机模式'}
         return {'ok': False, 'state': 'needs_enable', 'reason': 'needs_enable',
                 'sandbox_id': '', 'channel_id': '', 'stage': '',
                 'message': '请先启用 Windows 沙盒功能，并重启电脑后再创建隔离通道'}

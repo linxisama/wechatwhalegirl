@@ -1,3 +1,12 @@
+## 1.3.82 微信 4.1.15 回包四项修复：标题核验、自动打开、端口预留段、沙盒提示
+
+- 微信 4.1.15 把标题栏和正文都做成纯白、没有 1px 分隔线：旧判据找不到分隔线就拒绝发送（`RuntimeError: 未确认标题栏与正文之间的分隔线`），一个字都没发出去。现在先用面板竖线加面板内最靠上的一段墨迹定位标题带（`src/wechat_layout.py` 的 `title_region_fallback()`），失败文案改成「未确认聊天标题栏区域：既没有标题分隔线，也没有可证的标题行」，证据不足仍然拒绝。
+- 新增小字号标题族：4.1.15 的会话名只有 12px 高，原来的 medium（16~24px）与 legacy 两族全读不出来。`src/wechat_pixel_gui.py` 增 `_SMALL_TITLE_PASSES`（8~13px）与回退族 `_SMALL_TITLE_FALLBACK_PASSES`，族内三份变体必须逐字一致才采信（`_complete_title_pixels` 只查漏字不查错字，单份不能信）。
+- 标题核验只决定「这次能不能按发送键」，从不拿期望会话名去比对：读到的是别的会话照旧拒绝，读不到照旧拒绝，绝不把「没核实」当成「已核实」。
+- 自动打开会话（`WHALE_AUTO_OPEN_CHAT`）在 4.1.15 上 Ctrl+F 拿不到焦点：清掉误落进输入框的字之后，会再只读核一次标题——用户自己点开的正是目标会话就直接当成功；仍然不符就在本进程里停用自动打开（不落盘，升级微信后自然恢复），并明确提示「请先手动点开该会话」。
+- 端口自检分清「Windows 预留段」和「真被别人占着」：`src/site_profile.py` 新增 `excluded_port_ranges()` / `port_in_reserved()`，读 `netsh int ipv4 show excludedportrange protocol=tcp`。落在 Hyper-V/WinNAT 预留段时直接给「`net stop winnat` 再 `net start winnat`」或换端口的建议（1.3.81 回包里 8091 就落在 8023-8122）。
+- Windows 10 没有 `wsb.exe` 时不再引导「先启用沙盒再重启」：`src/sandbox_provision.py` 与 `src/sandbox_provision_api.py` 改为直接说「这台机器没有 wsb.exe 命令行（只带 WindowsSandbox.exe），请直接用本机模式」，建通道直接回 `no_cli`。
+- 新增用例 35 例：`tests/test_title_fallback_182.py` 12 例（含真机帧 `tests/fixtures/wechat-415-titlebar.png`）、`tests/test_open_chat_fallback_182.py` 6 例、`tests/test_port_reserved_182.py` 10 例、`tests/test_sandbox_win10_182.py` 7 例。
 ## 1.3.81 机器体检：抓不到截图时，回传一份文字报告
 
 - 新增 `--machine-check`：一条命令把「这台机器能不能跑」写成 `machine-check.txt`。报告第一屏就是结论（`ok` 能跑 / `warn` 有警告项 / `blocked` 现在跑不起来 / `unknown` 判断不了），后面依次是九项自检、数据目录、安装标记与回滚状态、旧版本残留、需要你做的事，最后附原始数据。
