@@ -36,6 +36,10 @@ class ChatState:
     def __init__(self, db):
         self.db = db
         self._last_trim = 0.0
+        # 记忆写入守卫（1.3.83）：默认只报告不拦截。guard_path 为空时完全不做任何事，
+        # 因此单测/无盘环境里的 ChatState 行为与旧版逐字一致。
+        self.guard_path = None
+        self.guard_config = {'mode': 'report'}
         db.executescript('''
         CREATE TABLE IF NOT EXISTS chat_ambient(
           scope TEXT, mid TEXT, subject TEXT, name TEXT, text TEXT, created REAL,
@@ -87,6 +91,8 @@ class ChatState:
         if not subject:
             raise ValueError('没有稳定的发送者标识，暂时不能写入个人记忆')
         now = time.time() if now is None else now
+        # 先守卫后落库：守卫只写一份 JSONL 报告，绝不改 text、绝不阻止写入。
+        self._guard_note(text, scope, subject, source, now)
         digest = hashlib.sha256(json.dumps([scope, subject, text], ensure_ascii=False).encode()).hexdigest()[:16]
         previous = self.db.execute('SELECT source,hits,status FROM chat_memories WHERE id=?', (digest,)).fetchone()
         hits = (previous[1] + int(previous[0] != str(source))) if previous else 1
@@ -111,6 +117,36 @@ class ChatState:
                         (max(10, min(5000, maximum)),))
         self.db.commit()
         return digest
+
+    def _guard_note(self, text, scope, subject, source, now):
+        """把「这条即将写入的记忆值不值得写」记到 JSONL 里（report-only）。
+
+        只读不写：不修改 text、不删除任何行、不改变 status。任何异常都吞掉——
+        守卫是旁路观察者，绝不能因为它自己的问题让一次正常写入失败。
+        """
+        path = getattr(self, 'guard_path', None)
+        if not path:
+            return
+        try:
+            from . import memory_guard
+            rows = self.db.execute(
+                'SELECT id,content FROM chat_memories WHERE scope=? AND subject=? AND status IN (?,?)',
+                (scope, subject, 'confirmed', 'candidate')).fetchall()
+            result = memory_guard.inspect(text, rows, getattr(self, 'guard_config', None))
+            if result.get('verdict') != 'warn':
+                return
+            memory_guard.note(path, {
+                'scope': str(scope)[:40],
+                'subject_tail': str(subject)[-8:],
+                'source': str(source)[:40],
+                'codes': result.get('codes') or [],
+                'similarity': result.get('similarity'),
+                'duplicate_of': result.get('duplicate_of'),
+                'keyword_count': result.get('keyword_count'),
+                'text': result.get('masked') or '',
+            }, now=now)
+        except Exception:
+            pass
 
     def recall(self, scope, subject, query='', limit=5, candidates=False):
         from .memory_rank import score as rank_score

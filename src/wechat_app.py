@@ -404,6 +404,9 @@ class WeChatRuntime:
         self.plugins = PluginManager(self.root / "data/wechat-only",
                                      default_overrides={"burst_merge": {"capMs": 3000}})
         self.chat_state = ChatState(self.db)
+        # 记忆写入守卫（1.3.83）：report-only，写 data/wechat-only/memory-guard.jsonl，不拦不删。
+        self.chat_state.guard_path = self.root / "data/wechat-only/memory-guard.jsonl"
+        self.chat_state.guard_config = {"mode": "report"}
         from .conversation_store import ConversationStore
         self.conversations = ConversationStore(self.db)
         from .local_learning import LocalLearning
@@ -2234,6 +2237,13 @@ class WeChatRuntime:
                                     (json.dumps(message, ensure_ascii=False), key))
                     self.plugins.run_on_sent(message, reply, self)
                     self.conversations.sent(message,reply,self)
+                    try:
+                        from .token_ledger import record_round as _token_round
+                        _token_round(self.root, message, reply,
+                                     prompt_text=locals().get('system_prompt') or '',
+                                     model=str(locals().get('engine_name') or ''))
+                    except Exception:
+                        pass
                     if generated_reply:
                         self.ai_test = "最近一次模型调用成功"
                 except Exception as exc:
@@ -2570,6 +2580,22 @@ def create_app(runtime=None):
         require_bound(app.state.bot)
         rows = [dict(row) for row in dsh_memory.recent()]
         return {'ok': True, 'total': len(rows), 'items': rows}
+
+    @app.get('/api/usage/summary')
+    async def token_usage():
+        """最近 7 天 token 用量估算（只回聚合数字，不落正文）。"""
+        require_bound(app.state.bot)
+        from . import token_ledger
+        root = app.state.bot.root
+        return {'ok': True, 'usage': token_ledger.summarize(token_ledger.path_for(root))}
+
+    @app.get('/api/memory/guard')
+    async def memory_guard_report():
+        """记忆写入守卫的只读报告（report-only，最近 20 条）。"""
+        require_bound(app.state.bot)
+        from . import memory_guard
+        path = app.state.bot.root / 'data/wechat-only/memory-guard.jsonl'
+        return {'ok': True, 'summary': memory_guard.summary(path), 'items': memory_guard.recent(path, 20)}
 
     @app.middleware("http")
     async def local_admin(request: Request, call_next):

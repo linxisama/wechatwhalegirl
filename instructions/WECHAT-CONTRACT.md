@@ -1,3 +1,9 @@
+## 1.3.83 记忆写入守卫（只报告）+ token 用量账本
+
+- 新增两个只读 GET：`/api/usage/summary` 与 `/api/memory/guard`，都要先过 `require_bound(app.state.bot)`；响应只有计数、时间戳、码名与打码后的文本片段，不含正文全文。
+- 代理桥接（whale-agent-bridge/1）的只读动作表新增 `usage.report`（→ `/api/usage/summary`）与 `memory.guard`（→ `/api/memory/guard`）。动作名与路径都不含 `token` 字样：握手报文有「不得出现 token 子串」的安全断言（`tests/test_agent_control_198.py`）。
+- 记忆写入守卫 `src/memory_guard.py` 只在 `ChatState.remember()` 里被调用，默认 `mode='report'`：只向 `data/wechat-only/memory-guard.jsonl` 追加 JSONL，不改变任何入库行为，也不产生新的失败路径。
+- token 账本 `src/token_ledger.py` 写 `data/wechat-only/token-usage.jsonl`，字段 `ts/source/prompt_tokens/reply_tokens/total/model`；`source` 取 `dsh`（`message['_dsh_generated']` 为真）或 `local`。写盘失败不外抛。
 ## 1.3.82 微信 4.1.15 回包四项修复：标题核验、自动打开、端口预留段、沙盒提示
 
 - 微信 4.1.15 把标题栏和正文都做成纯白、没有 1px 分隔线：旧判据找不到分隔线就拒绝发送（`RuntimeError: 未确认标题栏与正文之间的分隔线`），一个字都没发出去。现在先用面板竖线加面板内最靠上的一段墨迹定位标题带（`src/wechat_layout.py` 的 `title_region_fallback()`），失败文案改成「未确认聊天标题栏区域：既没有标题分隔线，也没有可证的标题行」，证据不足仍然拒绝。

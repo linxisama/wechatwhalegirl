@@ -1,3 +1,11 @@
+## 1.3.83 记忆写入守卫（只报告）+ token 用量账本
+
+- 记忆写进库之前先过一遍守卫，但只报告、不拦截：`src/memory_guard.py` 认五类疑点——疑似密钥（SECRET，写日志时打码）、相对时间（RELATIVE_TIME，「明天下午」存下来就没意义）、日记腔（DIARY_SMELL）、跟已有记录几乎重复（DUP，相似度 ≥0.95）、太短没信息量（TOO_VAGUE，短于 6 字）。命中只在 `data/wechat-only/memory-guard.jsonl` 留一行记录，记忆照常保存：先看清误报率，再谈要不要拦。
+- 判定全在本地、不调模型：关键词、长度、相似度都是纯标准库算，不额外花 token，也不联网。守卫默认 `mode='report'`；设成 `'off'` 就整段跳过。写日志任何一步失败都吞掉，绝不影响 `remember()` 本身。
+- token 用量账本 `src/token_ledger.py`：每轮对话把提示词与回复按「中文每字 1 token、其余每 4 字符 1 token」估算后追加到 `data/wechat-only/token-usage.jsonl`，并标 `source=dsh|local`，能看出这轮主力是 DSH 还是本地兜底。
+- 两个只读接口：`GET /api/usage/summary`（近 7 天分来源汇总）与 `GET /api/memory/guard`（最近 20 条守卫记录）；代理桥接侧对应动作 `usage.report` / `memory.guard`，都在只读表里，不需要写权限。
+- 估算不是账单：它按字符数换算，跟服务商计费口径有差；要精确数字只能看 DSH 自己的 tokenUsage 投影。
+- 新增 `tests/test_memory_guard_183.py` 27 例：五类码判定、mode off、脏输入不抛、脱敏、summary/recent 的计数与排序、估算与按天过滤，以及 ChatState 的五种情形（只报告不阻断、`guard_path` 不可写也不影响记忆）。
 ## 1.3.82 微信 4.1.15 回包四项修复：标题核验、自动打开、端口预留段、沙盒提示
 
 - 微信 4.1.15 把标题栏和正文都做成纯白、没有 1px 分隔线：旧判据找不到分隔线就拒绝发送（`RuntimeError: 未确认标题栏与正文之间的分隔线`），一个字都没发出去。现在先用面板竖线加面板内最靠上的一段墨迹定位标题带（`src/wechat_layout.py` 的 `title_region_fallback()`），失败文案改成「未确认聊天标题栏区域：既没有标题分隔线，也没有可证的标题行」，证据不足仍然拒绝。
