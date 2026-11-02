@@ -19,6 +19,7 @@ _ALIGN_LEFT = QtCore.Qt.AlignmentFlag.AlignLeft if hasattr(QtCore.Qt, 'Alignment
 
 _STATE_TITLES = {'enabled': '已启用', 'disabled': '未启用', 'absent': '组件缺失',
                  'no_cli': '已启用，但缺少 wsb 命令行（Windows 10）',
+                 'broken': '容器管理器服务损坏（Windows 沙盒起不来）',
                  'unsupported': '不支持', 'unknown': '状态未知', 'failed': '启用失败',
                  'pending_reboot': '等待重启', 'elevation_started': '等待管理员授权'}
 _INITIAL_NOTICE = '正在读取 Windows 沙盒状态…'

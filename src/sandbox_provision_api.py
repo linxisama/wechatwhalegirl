@@ -68,6 +68,12 @@ class SandboxProvisionService:
             base.update({'ok': True, 'reason': 'enabled', 'next_step': 'create_channel',
                          'message': text})
             return base
+        if state == 'broken':
+            # 容器管理器服务坏了：沙盒窗口都起不来，别让用户以为点“启用/建通道”能解决。
+            base.update({'ok': False, 'reason': 'container_service_broken', 'next_step': 'manual',
+                         'message': str(status.get('message') or '')
+                                    + ('；' + str(status.get('hint') or '') if status.get('hint') else '')})
+            return base
         if state == 'no_cli':
             base.update({'ok': False, 'reason': 'no_cli', 'next_step': 'manual',
                          'message': str(status.get('message') or '')

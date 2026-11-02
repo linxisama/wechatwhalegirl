@@ -367,6 +367,66 @@ def probe_launch(*, system_root=None, timeout=PROBE_TIMEOUT, poll=PROBE_POLL,
         "windows": len(fresh),
     }
 
+CONTAINER_ROOT = r"C:\ProgramData\Microsoft\Windows\Containers"
+UTILITY_VM_KEY = r"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Virtualization\Containers\UtilityVm"
+
+
+def container_store_info(*, root=None, reg=None):
+    """容器组件存储：CmService 起不来最常见的两个原因就是 BaseImages/PortableBaseLayer 缺失。
+
+    只读判断，不创建目录、不写注册表。取不到就记 None，绝不抛。
+    """
+    base = Path(root) if root else Path(CONTAINER_ROOT)
+    info = {"root": str(base)}
+    # 键名带下划线，和 verdict() 里读的 base_images / portable_base_layer 对齐。
+    for key, name in (("base_images", "BaseImages"), ("portable_base_layer", "PortableBaseLayer"),
+                      ("sandboxes", "Sandboxes"), ("dumps", "Dumps"), ("zygotes", "Zygotes")):
+        try:
+            info[key] = (base / name).exists()
+        except OSError:
+            info[key] = None
+    getter = reg or _reg
+    try:
+        values = getter(UTILITY_VM_KEY, ("*",))
+    except Exception:
+        values = {}
+    info["utility_vm"] = bool(values)
+    return info
+
+
+def service_events(*, runner=None, count=3):
+    """最近的容器管理器服务错误事件（7023）：区分「服务没启动」和「启动时报找不到文件」。"""
+    run = runner or _default_runner
+    command = ["wevtutil", "qe", "System", "/q:*[System[(EventID=7023)]]",
+               "/c:%d" % count, "/rd:true", "/f:text"]
+    try:
+        code, text = run(command, timeout=RUN_TIMEOUT)
+    except Exception as exc:  # noqa: BLE001 - 诊断脚本不允许因为取事件失败而崩
+        return {"exit": -1, "lines": 0, "tail": str(exc)[:200], "file_not_found": False}
+    lines = [line.rstrip() for line in (text or "").splitlines()]
+    lines = [line for line in lines if line.strip()]
+    # 事件日志里 7023 是「某个服务启动失败」的通用码，别的服务也会报；
+    # 只认提到容器管理器/CmService 的那几段，免得把无关服务的错误算到沙盒头上。
+    blocks, current = [], []
+    for line in lines:
+        if line.lstrip().startswith("Event[") and current:
+            blocks.append(current)
+            current = []
+        current.append(line)
+    if current:
+        blocks.append(current)
+    relevant = [block for block in blocks
+                if any(("容器管理器" in line or "CmService" in line
+                        or "Containers" in line or "containers" in line) for line in block)]
+    joined = "\n".join("\n".join(block) for block in relevant).lower()
+    file_not_found = ("cannot find the file" in joined
+                      or "找不到" in joined
+                      or "0x80070002" in joined)
+    body = relevant[-1] if relevant else ["（最近的 7023 事件里没有容器管理器相关记录）"]
+    return {"exit": code, "lines": len(lines), "tail": _tail("\n".join(body), 400),
+            "file_not_found": file_not_found}
+
+
 def privilege_info():
     try:
         from .elevation import is_elevated
@@ -398,6 +458,12 @@ NO_CLI_HINT = (
     "本机模式下收发消息、插件、DSH 全部可用，只是没有隔离沙盒。"
 )
 OK_HINT = "沙盒命令行可用，隔离通道可以使用。"
+BROKEN_HINT = (
+    "容器管理器服务起不来（CmService 启动时报找不到文件，容器组件存储缺 BaseImages/PortableBaseLayer）："
+    "这是系统层损坏，不是控制台的问题，重装或修复系统之前沙盒不可能启动。"
+    "控制台请继续用本机模式——收发消息、插件、DSH 主聊、记忆全部可用；"
+    "要隔离通道请把系统修好或换 Win11 24H2+。"
+)
 
 
 def verdict(report):
@@ -418,6 +484,11 @@ def verdict(report):
     if not probe.get("started") and probe.get("reason") == "no_sandbox_app":
         return "no_sandbox_app", NO_APP_HINT
     cm_service = (services.get("CmService") or {}).get("state") or ""
+    store = report.get("container_store") or {}
+    events = report.get("events") or {}
+    store_missing = store.get("base_images") is False or store.get("portable_base_layer") is False
+    if cm_service and cm_service != "RUNNING" and (store_missing or events.get("file_not_found")):
+        return "container_service_broken", BROKEN_HINT
     if cm_service and cm_service != "RUNNING":
         return "container_service_down", (
             "容器服务 CmService 状态是 %s，Windows 沙盒无法创建虚拟机。" % cm_service
@@ -439,6 +510,8 @@ def collect(*, probe=False, version=None, runner=None, resolver=None,
         "services": service_info(runner=runner),
         "hcsdiag": hcsdiag_info(runner=runner),
         "privilege": privilege_info(),
+        "container_store": container_store_info(),
+        "events": service_events(runner=runner),
     }
     if probe:
         report["probe"] = probe_launch(system_root=system_root, spawn=spawn)
@@ -487,6 +560,15 @@ def render(report):
     lines.append("")
     lines.append("[权限]")
     _flat("", report.get("privilege") or {}, lines)
+    lines.append("")
+    lines.append("[容器存储]")
+    _flat("", report.get("container_store") or {}, lines)
+    lines.append("")
+    lines.append("[服务事件]")
+    events = report.get("events") or {}
+    lines.append("exit=%s lines=%s file_not_found=%s" % (
+        events.get("exit"), events.get("lines"), events.get("file_not_found")))
+    lines.append(events.get("tail") or "")
     lines.append("")
     lines.append("[启动探测]")
     _flat("", report.get("probe") or {"note": "未执行（加 --probe-launch 才会真的启动一次沙盒）"}, lines)

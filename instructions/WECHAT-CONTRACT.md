@@ -1,3 +1,11 @@
+## 1.3.80 沙盒诊断升级：分清「服务没启动」和「系统组件真的坏了」
+
+- 诊断报告新增两项证据：容器组件存储（`C:\ProgramData\Microsoft\Windows\Containers` 下的 BaseImages / PortableBaseLayer / Sandboxes / Dumps / Zygotes 是否存在，以及 `UtilityVm` 注册表键）与最近的容器管理器服务错误事件（`wevtutil qe System` 取事件 7023，识别「找不到文件」）。
+- 新增结论码 `container_service_broken`：只有「CmService 状态查到了且不是 RUNNING」并且「BaseImages/PortableBaseLayer 缺失，或事件 7023 报找不到文件」两条同时成立才给出。报告里直接写清「这是系统组件损坏，不是控制台的问题」，并给出 sfc/DISM 修复、重装系统、换 Windows 11 24H2+ 三条路径，同时说明本机模式照常可用。
+- 为什么不只看服务状态：健康机器上 `PortableBaseLayer` 也可能不存在（本机 Win11 实测如此），只看目录会把好机器误判成坏机器；两条同时成立才判损坏。
+- 沙盒面板与 `/api/sandbox/provision/status` 同步：`state=broken` 时标题是「容器管理器服务损坏（Windows 沙盒起不来）」，`ok=false`、`next_step=manual`，不再劝用户去点「启用 Windows 沙盒」或「创建隔离通道」。
+- 诊断报告新增 `[容器存储]` 与 `[服务事件]` 两节，对方回传时能直接看到证据，不用再猜。
+- 新增 `tests/test_sandbox_doctor_180.py` 16 例，锁定证据采集、结论判定、界面措辞与 `_container_broken` 的保守边界。
 ## 1.3.79 沙盒环境诊断：一条命令把「这台机器为什么用不了沙盒」变成可回传的报告
 
 - 新增命令行 `--sandbox-doctor`：只读采集系统版本、`WindowsSandbox.exe`、`wsb.exe`、容器服务（CmService/vmcompute/hns）、`hcsdiag list`、DISM 功能状态与管理员权限，写成 UTF-8(BOM)+CRLF 的文本报告，默认落在桌面并自动打开。

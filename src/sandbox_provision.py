@@ -241,6 +241,32 @@ def _result(state, supported, edition, feature, wsb_exe, needs_reboot, reason, m
             'reason': reason, 'message': message, 'hint': hint, 'next_step': next_step}
 
 
+def _container_broken(runner=None, store=None):
+    """容器管理器服务起不来（Win10 精简版常见）：服务不在 RUNNING，且组件存储缺 BaseImages。
+
+    只在「服务确实查到了、状态不是 RUNNING」且「组件存储缺失」同时成立时才判损坏，
+    免得把一台从没开过沙盒的健康机器误判成坏机器、挡住用户点“启用”。
+    """
+    try:
+        from . import sandbox_doctor
+        info = store if isinstance(store, dict) else sandbox_doctor.container_store_info()
+        result = _call_runner(runner, ['sc', 'query', 'CmService'], 10)
+        state = sandbox_doctor._sc_state(result.get('stdout') or '')
+    except Exception:
+        return False
+    if not state or state == 'RUNNING':
+        return False
+    return info.get('base_images') is False or info.get('portable_base_layer') is False
+
+
+def _container_broken_hint():
+    return ('这台机器上的「容器管理器服务」（CmService）起不来，Windows 沙盒本身启动失败，'
+            '控制台再怎么建通道也用不了。这是系统组件损坏，不是控制台的问题。'
+            '可以这样继续：① 用本机模式（微信照旧在桌面运行，功能完整，只是不隔离）；'
+            '② 想修系统：先跑 sfc /scannow 和 DISM /Online /Cleanup-Image /RestoreHealth，'
+            '修不好就只能重装系统或用官方 ISO 升级；'
+            '③ 想要隔离通道：换一台 Windows 11（24H2 及以上）机器，点“重新检测”就会变成可建通道。')
+
 def _no_cli_hint():
     return ('自动建隔离通道要调用 wsb.exe，这台机器没有，所以通道功能暂时用不了。'
             '可以这样继续：① 用本机模式（微信照旧在桌面运行，不隔离，功能完整）；'
@@ -280,6 +306,14 @@ def _detect(runner, registry_reader, last_record):
     probe = _probe_feature(runner)
     feature = probe['state']
     if feature == 'Enabled':
+        if _container_broken(runner):
+            # Win10 19045 精简版实测：功能显示已启用，但 CmService 卡在 START_PENDING，
+            # 组件存储缺 BaseImages/PortableBaseLayer，沙盒窗口根本起不来。
+            return _result('broken', True, edition, 'Enabled', wsb_exe, needs_reboot,
+                           'container_service_broken',
+                           _edition_label(edition) + '上 Windows 沙盒功能显示已启用，'
+                           '但容器管理器服务起不来，沙盒启动会失败',
+                           _container_broken_hint(), 'manual')
         if not wsb_exe:
             # Windows 10 19045 实测：功能开着、WindowsSandbox.exe 也在，但根本没有 wsb.exe。
             # 这时不能说「已就绪、去建通道」，否则用户点下去只会看到「找不到命令行」。
