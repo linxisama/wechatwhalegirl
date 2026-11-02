@@ -12,6 +12,11 @@ import re
 import time
 from pathlib import Path
 
+try:  # 包内正常运行走相对导入；脱离包结构（源码直跑、扁平单测）时退化为顶层模块
+    from . import jsonl_tail
+except ImportError:  # pragma: no cover - 仅在非包结构下走到
+    import jsonl_tail
+
 MODES = ('report', 'off')
 DUP_THRESHOLD = 0.95
 DIARY_MIN_CHARS = 40
@@ -133,7 +138,7 @@ def summary(path, limit=200):
     if not path:
         return out
     try:
-        lines = Path(path).read_text('utf-8').splitlines()[-limit:]
+        lines = jsonl_tail.tail_lines(path, limit)
     except Exception:
         return out
     for line in lines:
@@ -156,7 +161,7 @@ def recent(path, limit=20):
         return []
     try:
         keep = max(1, min(200, int(limit)))
-        lines = Path(path).read_text('utf-8').splitlines()[-keep:]
+        lines = jsonl_tail.tail_lines(path, keep)
     except Exception:
         return []
     out = []

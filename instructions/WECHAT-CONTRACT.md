@@ -1,3 +1,9 @@
+## 1.3.84 用量与记忆巡检面板（只读）+ 大 JSONL 流式读取
+
+- 协议零变化：没有新增路由（`routes` 仍 178）、没有新增代理动作，`usage.report`（→ `/api/usage/summary`）与 `memory.guard`（→ `/api/memory/guard`）沿用 1.3.83 的映射。
+- 面板 `src/gui/usage_panel.py` 只消费这两个 GET；两者仍先过 `require_bound(app.state.bot)`，响应字段与 1.3.83 完全一致（`ok` / `usage` / `summary` / `items`）。
+- 读取口径改为流式：`src/jsonl_tail.py` 的 `iter_lines()` / `tail_lines()` 只按块读，`token_ledger.summarize`、`memory_guard.summary`、`memory_guard.recent` 的入参、返回结构与坏行策略都不变；`data/wechat-only/*.jsonl` 的文件格式也不变。
+- 第三方脚本继续用 `read_text()` 读这两个 JSONL 也不受影响；本次只是官方读取路径换成流式，不构成破坏性变更。
 ## 1.3.83 记忆写入守卫（只报告）+ token 用量账本
 
 - 新增两个只读 GET：`/api/usage/summary` 与 `/api/memory/guard`，都要先过 `require_bound(app.state.bot)`；响应只有计数、时间戳、码名与打码后的文本片段，不含正文全文。

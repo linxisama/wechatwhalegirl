@@ -10,6 +10,11 @@ import json
 import time
 from pathlib import Path
 
+try:  # 包内正常运行走相对导入；脱离包结构（源码直跑、扁平单测）时退化为顶层模块
+    from . import jsonl_tail
+except ImportError:  # pragma: no cover - 仅在非包结构下走到
+    import jsonl_tail
+
 ASCII_PER_TOKEN = 4.0
 CJK_PER_TOKEN = 1.0
 RECENT_DAYS = 7
@@ -50,7 +55,7 @@ def summarize(path, days=RECENT_DAYS, now=None):
     if not path:
         return out
     try:
-        lines = Path(path).read_text('utf-8').splitlines()
+        lines = jsonl_tail.iter_lines(path)
     except Exception:
         return out
     cutoff = (time.time() if now is None else now) - max(0, int(days)) * 86400

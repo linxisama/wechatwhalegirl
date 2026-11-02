@@ -1,3 +1,12 @@
+## 1.3.84 用量与记忆巡检面板（只读）+ 大 JSONL 流式读取
+
+- 控制台「对话与记忆」页新增子页「用量与记忆巡检」（`src/gui/usage_panel.py`，挂载点 `src/gui/dialogue_tab.py:74`）：上半是近 7 天 token 估算——总轮数、提示/回复 token、DSH 与本地兜底各几轮、最后一条时间；下半是记忆写入前的自检记录——总条数、需留意条数、五类判定码分布，以及最近 20 条的打码原文。整页只读，没有保存、删除、清空入口。
+- 面板只复用既有只读接口 `GET /api/usage/summary` 与 `GET /api/memory/guard`（`src/wechat_app.py:2584-2598`），没有新增路由（仍 178 条），也没有给代理加动作。两份数据都回来才一起渲染；某一份失败只在面板底部提示一句，不挡另一份。
+- 只有面板可见时才每 15 秒自刷新（`showEvent` 启动、`hideEvent` 停止），切走立即停。
+- 新增 `src/jsonl_tail.py`：`iter_lines()` 按 256KB 分块解码逐行产出，`tail_lines()` 用定长 deque 只留最后 N 行。`src/token_ledger.py` 的 `summarize()` 与 `src/memory_guard.py` 的 `summary()` / `recent()` 改用它——账本涨到几十万行时，原来 `Path.read_text().splitlines()` 会把整份文件读进内存，现在内存只跟保留行数有关；返回结构、坏行跳过、按天过滤一律不变。
+- 这两个模块的导入写成「相对导入优先、失败退化为顶层导入」，源码直跑与 `from src import ...` 两种方式都不会 ImportError（同 `src/update_service.py` 的既有写法）。
+- 新增 `tests/test_usage_panel_184.py` 10 例与 `tests/test_jsonl_tail_184.py` 8 例：两个端点都只读、两份都回来才渲染、失败解锁、空状态文案、`ok` / `success` 两种键都接、请求抛错不卡死、定时器只在可见时跑；以及分块边界切在多字节汉字中间、无尾换行、空文件、缺失路径、目录当路径，并用「让 `Path.read_text` 抛异常」证明新实现不再整文件读、结果与旧口径逐项相同。
+- 这一版不改发送、接收、记忆写入与插件行为：面板看不到数字时只说明账本为空，不会去造记录。
 ## 1.3.83 记忆写入守卫（只报告）+ token 用量账本
 
 - 记忆写进库之前先过一遍守卫，但只报告、不拦截：`src/memory_guard.py` 认五类疑点——疑似密钥（SECRET，写日志时打码）、相对时间（RELATIVE_TIME，「明天下午」存下来就没意义）、日记腔（DIARY_SMELL）、跟已有记录几乎重复（DUP，相似度 ≥0.95）、太短没信息量（TOO_VAGUE，短于 6 字）。命中只在 `data/wechat-only/memory-guard.jsonl` 留一行记录，记忆照常保存：先看清误报率，再谈要不要拦。
