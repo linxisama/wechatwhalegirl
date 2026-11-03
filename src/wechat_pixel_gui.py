@@ -73,6 +73,12 @@ _SMALL_TITLE_PASSES = ((2, 140, 8, 'nearest'), (2, 150, 8, 'nearest'),
 # 时才轮到它，同样要求三份逐字一致。
 _SMALL_TITLE_FALLBACK_PASSES = ((3, 140, 8, 'nearest'), (4, 150, 8, 'nearest'),
                                 (2.5, None, 8, 'smooth'))
+# 边界档（墨迹高 14-17px）：真机 1920x1440 / 100% 下标题墨迹正好 16px，正压在中等字号
+# （16-24px）的下沿，medium 三族整族都读不出。16px 帧上唯一读得全的实测线索是
+# 「2 倍放大 + 8px 白边」：NEAREST 2 倍阈值 160、2 倍平滑不二值化、NEAREST 2.5 倍
+# 阈值 150 各读出一份，族内三份仍要求逐字一致；18px 及以上行为保持一字不变。
+_BOUNDARY_TITLE_PASSES = ((2, 160, 8, 'nearest'), (2, None, 8, 'smooth'),
+                          (2.5, 150, 8, 'nearest'))
 
 
 def _pass_variants(passes):
@@ -89,6 +95,10 @@ def _title_pass_families(passes):
     if passes is _SMALL_TITLE_PASSES:
         return (('small', _pass_variants(_SMALL_TITLE_PASSES)),
                 ('small_fallback', _pass_variants(_SMALL_TITLE_FALLBACK_PASSES)))
+    if passes is _BOUNDARY_TITLE_PASSES:
+        # 第一族是新档的实测三份，第二族保留旧表三份：边界档读不出时仍有老帧证据兜底。
+        return (('boundary', _pass_variants(_BOUNDARY_TITLE_PASSES)),
+                ('legacy', _pass_variants(tuple((s, t, 0) for s, t in _TITLE_PASSES))))
     return (('legacy', _pass_variants(passes)),)
 
 
@@ -106,10 +116,12 @@ def _title_passes(frame, ink):
     with frame.crop(ink).convert('RGB') as crop, mark_mask(crop) as mask:
         box = mask.getbbox()
     height = box[3] - box[1] if box else 0
-    if 16 <= height <= 24:
+    # 18-24px 仍是中等字号档；14-17px 走新的边界档（真机 16px 就在这一段）；
+    # 8-13px 是小字号档（4.1.15.13 的 12px 标题条）；其余（含 25px 以上）仍是旧表。
+    if 18 <= height <= 24:
         return _MEDIUM_TITLE_PASSES, height
-    # 14-15px 仍归旧表：旧表是 14-18px 帧上实测出来的，没测过的更小字号不往它身上塞；
-    # 4.1.15.13 的 12px 标题条由小字号档的三份实测变体负责。
+    if 14 <= height <= 17:
+        return _BOUNDARY_TITLE_PASSES, height
     if 8 <= height <= 13:
         return _SMALL_TITLE_PASSES, height
     return tuple((s, t, 0) for s, t in _TITLE_PASSES), height
@@ -566,9 +578,11 @@ def readonly_gui_class(base):
                 ink = _title_ink_region(frame, region)
                 passes, glyph_height = _title_passes(frame, ink)
                 self._pixel_title_evidence['glyph_height'] = glyph_height
-                self._pixel_title_evidence['profile'] = ('medium' if passes is _MEDIUM_TITLE_PASSES
-                                                        else 'small' if passes is _SMALL_TITLE_PASSES
-                                                        else 'legacy')
+                self._pixel_title_evidence['profile'] = (
+                    'medium' if passes is _MEDIUM_TITLE_PASSES
+                    else 'boundary' if passes is _BOUNDARY_TITLE_PASSES
+                    else 'small' if passes is _SMALL_TITLE_PASSES
+                    else 'legacy')
                 deadline = time.monotonic() + _title_read_budget()
                 outcomes = []
                 # 分级信任：族内三份完整读数一致才采信，整族作废才换下一族。全程不接收、

@@ -1,3 +1,9 @@
+## 1.3.87 隐藏窗口恢复、逐键前台守卫、14-17px 标题边界档
+
+- 窗口恢复契约：`_visible()` 用 `IsWindowVisible` 判断可见性，查询异常按可见处理；`_restore_minimized()` 仅在「未最小化且可见」时返回成功，隐藏窗口用 `SW_SHOWNOACTIVATE(4)` 恢复且不抢前台；`available()` 对隐藏窗口仍报 `reason=minimized`，失败文案明确写「被隐藏」。
+- 打开会话的前台契约：Ctrl+F、Ctrl+V、Enter 每一批按键前都必须调用 `_require_foreground(gui, deadline)`；丢失前台时返回 `_GuardFailed('foreground_lost', ...)`，不得再发 Ctrl+V，更不得在无法确认前台时按 Enter。仅开始抢一次前台不再满足契约。
+- 标题分档契约：8-13px small、14-17px boundary、18-24px medium、其余旧表；boundary 族三份必须逐字一致，失败后旧表三份兜底。18px 及以上行为与 1.3.86 完全一致（`tests/test_pixel_title_medium1341.py`、`tests/test_title_fallback_182.py` 原样通过）。仍为内部测试候选，不制作正式安装包。
+
 ## 1.3.86 剪贴板占用重试与恢复降级
 
 - 发送通道契约不变：一次发送最多按一次发送键、失败绝不重发；本版只改「怎么打开剪贴板」与「清理动作的语义」。

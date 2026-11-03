@@ -182,46 +182,74 @@ def _iconic(hwnd) -> bool:
         return False
 
 
-# 自动恢复最小化窗口（1.3.59）：真机上用户发来消息、回复也生成了，可发送阶段直接
-# guia_unavailable「账号与窗口绑定已失效」——微信窗口缩在托盘里，用户看到的是「发了
-# 却没回」。这里只改窗口的显示状态（SW_SHOWNOACTIVATE，显示但不抢前台），不写微信
-# 进程内存、不切会话、不点会话列表，也不发送任何按键。
-RESTORE_WINDOW_SECONDS = 3.0
-RESTORE_WINDOW_POLL = 0.15
-RESTORE_SHOW_FLAG = 4          # SW_SHOWNOACTIVATE
-
-
-def _restore_minimized(hwnd, sleep=None, clock=None, seconds=RESTORE_WINDOW_SECONDS,
-                       user32=None) -> bool:
-    """把最小化的窗口恢复显示；返回是否已不再最小化（本来就没最小化也算成功）。"""
-    try:
-        hwnd = int(hwnd or 0)
-    except Exception:
-        return False
-    if not hwnd:
-        return False
-    try:
-        user32 = user32 if user32 is not None else _user32()
-        if not user32.IsIconic(hwnd):
-            return True
-        user32.ShowWindow(hwnd, RESTORE_SHOW_FLAG)
-    except Exception:
-        return False
-    sleep = sleep or time.sleep
-    clock = clock or time.monotonic
-    end = clock() + float(seconds)
-    while True:
-        try:
-            if not user32.IsIconic(hwnd):
-                return True
-        except Exception:
-            return False
-        if clock() >= end:
-            return False
-        sleep(RESTORE_WINDOW_POLL)
-
-
-def _user32():
+def _visible(hwnd) -> bool:
+    """主窗口是否可见；查不到（含句柄已不存在）就按可见处理，交给后续校验兜底。"""
+    try:
+        import ctypes
+        hwnd = int(hwnd or 0)
+        if not hwnd:
+            return False
+        user32 = ctypes.windll.user32
+        # 句柄不存在（离线测试的假 hwnd、或窗口已销毁）属于「未知」：按可见处理，由
+        # 绑定校验/is_alive 负责报错。绝不能把「查不到」当成「被隐藏」，否则会对着
+        # 无效句柄空等恢复。
+        if not user32.IsWindow(ctypes.c_void_p(hwnd)):
+            return True
+        return bool(user32.IsWindowVisible(ctypes.c_void_p(hwnd)))
+    except Exception:
+        return True
+
+
+# 自动恢复最小化/隐藏窗口（1.3.59 只认最小化；1.3.87 补上「被隐藏」）：真机上用户
+# 发来消息、回复也生成了，可发送阶段直接 guia_unavailable「账号与窗口绑定已失效」
+# ——微信窗口缩在托盘里或被系统隐藏，用户看到的是「发了却没回」。这里只改窗口的显示
+# 状态（SW_SHOWNOACTIVATE，显示但不抢前台），不写微信进程内存、不切会话、不点会话
+# 列表，也不发送任何按键。
+RESTORE_WINDOW_SECONDS = 3.0
+RESTORE_WINDOW_POLL = 0.15
+RESTORE_SHOW_FLAG = 4          # SW_SHOWNOACTIVATE
+
+
+def _restore_minimized(hwnd, sleep=None, clock=None, seconds=RESTORE_WINDOW_SECONDS,
+                       user32=None) -> bool:
+    """把最小化或被隐藏的窗口恢复显示；返回是否已经可见且不再最小化。"""
+    try:
+        hwnd = int(hwnd or 0)
+    except Exception:
+        return False
+    if not hwnd:
+        return False
+    try:
+        user32 = user32 if user32 is not None else _user32()
+        # 老替身没有 IsWindowVisible：缺这个方法就按可见处理，旧测试照旧能跑。
+        is_visible = getattr(user32, 'IsWindowVisible', None)
+
+        def shown():
+            if user32.IsIconic(hwnd):
+                return False
+            return True if is_visible is None else bool(is_visible(hwnd))
+
+        # 已经可见且未最小化时一个 ShowWindow 都不调（零副作用）。
+        if shown():
+            return True
+        user32.ShowWindow(hwnd, RESTORE_SHOW_FLAG)
+    except Exception:
+        return False
+    sleep = sleep or time.sleep
+    clock = clock or time.monotonic
+    end = clock() + float(seconds)
+    while True:
+        try:
+            if shown():
+                return True
+        except Exception:
+            return False
+        if clock() >= end:
+            return False
+        sleep(RESTORE_WINDOW_POLL)
+
+
+def _user32():
     """取 user32；延迟 import 让本模块在没有 ctypes.windll 的平台上也能被导入。"""
     import ctypes
     return ctypes.windll.user32
@@ -658,9 +686,9 @@ class GuiaChannel:
     def _build(self):
         if self._gui is not None:
             return self._gui
-        gui = self._factory()
-        self._restore_window_if_needed(gui)
-        self._assert_binding(gui)
+        gui = self._factory()
+        self._restore_window_if_needed(gui)
+        self._assert_binding(gui)
         # 关键：guia 的 _get_uia() 一旦跑起来就会尝试热激活（写微信进程内存）。
         # 实例级覆盖成恒 None，_chat_is_open / _pending_text_ok 全部自动退回 OCR 分支。
         gui._uia = None
@@ -685,22 +713,38 @@ class GuiaChannel:
                 or int(gui.pid) != int(expected['pid'])):
             raise _GuardFailed('guia_unavailable', '账号与窗口绑定已失效，本次不操作微信')
 
-    def _restore_window_if_needed(self, gui):
-        """窗口最小化时先恢复显示（不抢前台）；本来没最小化时零副作用。
-
-        为什么放在 _build 里：send / probe / available 三条路径都先构造 gui，窗口缩在
-        托盘里时后面每一步都会 fail-closed 成 guia_unavailable，而这跟「账号绑定失效」
-        是两回事。只对已绑定账号的那一个 hwnd 动手，恢复不了照旧由 _assert_binding 报错。
-        """
-        hwnd = int((self._expected_window or {}).get('hwnd') or getattr(gui, 'main_hwnd', 0) or 0)
-        if not hwnd or not _iconic(hwnd):
-            return True
-        restored = _restore_minimized(hwnd, sleep=self._sleep, clock=self._clock)
-        log_send_phase('guia_restore_window', getattr(self, '_target', '') or '', 0,
-                       '窗口最小化，已自动恢复' if restored else '窗口最小化，自动恢复失败', 'guia')
-        return restored
-
-    def available(self) -> GuiaSendResult:
+    def _restore_window_if_needed(self, gui):
+        """窗口最小化或被隐藏时先恢复显示（不抢前台）；本来正常时零副作用。
+
+        为什么放在 _build 里：send / probe / available 三条路径都先构造 gui，窗口缩在
+        托盘里（或被别的程序隐藏）时后面每一步都会 fail-closed 成 guia_unavailable，
+        而这跟「账号绑定失效」是两回事。只对已绑定账号的那一个 hwnd 动手，恢复不了
+        照旧由 _assert_binding 报错。
+        """
+        hwnd = int((self._expected_window or {}).get('hwnd') or getattr(gui, 'main_hwnd', 0) or 0)
+        minimized = bool(hwnd) and _iconic(hwnd)
+        hidden = bool(hwnd) and not _visible(hwnd)
+        if not hwnd or not (minimized or hidden):
+            return True
+        restored = _restore_minimized(hwnd, sleep=self._sleep, clock=self._clock)
+        if minimized:
+            note = '窗口最小化，已自动恢复' if restored else '窗口最小化，自动恢复失败'
+        else:
+            note = '窗口被隐藏，已自动恢复' if restored else '窗口被隐藏，自动恢复失败'
+        log_send_phase('guia_restore_window', getattr(self, '_target', '') or '', 0, note, 'guia')
+        return restored
+
+    def _restore_hidden_after_key(self, gui, target):
+        """按键之后窗口若被弄成隐藏，立刻恢复；绝不把「窗口消失」留给下一次调用。"""
+        hwnd = int((self._expected_window or {}).get('hwnd')
+                   or getattr(gui, 'main_hwnd', 0) or 0)
+        if not hwnd or _visible(hwnd):
+            return
+        _restore_minimized(hwnd, sleep=self._sleep, clock=self._clock)
+        log_send_phase('guia_restore_window', target, 0,
+                       '窗口在按键后变为隐藏，已自动恢复', 'guia')
+
+    def available(self) -> GuiaSendResult:
         """可用性探测：窗口在、未最小化、guia 可导入、系统 OCR 可用。"""
         try:
             gui = self._build()
@@ -711,8 +755,13 @@ class GuiaChannel:
                 return _fail('guia_unavailable', '微信窗口已关闭，请从托盘打开微信并登录')
         except Exception as exc:
             return _fail('guia_unavailable', f'{type(exc).__name__}: {exc}')
-        if _iconic(getattr(gui, 'main_hwnd', 0)):
-            return _fail('minimized', '微信窗口最小化且自动恢复失败，请手动恢复后再发')
+        hwnd = getattr(gui, 'main_hwnd', 0)
+        minimized = _iconic(hwnd)
+        hidden = bool(hwnd) and not _visible(hwnd)
+        if minimized or hidden:
+            # reason 码不新增：隐藏与最小化都属于「窗口不在可点击状态」，交给用户手动恢复。
+            return _fail('minimized', '微信窗口最小化且自动恢复失败，请手动恢复后再发'
+                         if minimized else '微信窗口被隐藏且自动恢复失败，请手动显示后再发')
         try:
             check = getattr(gui, 'ocr_available', None)
             if callable(check):
@@ -1423,10 +1472,14 @@ class GuiaChannel:
         except Exception as exc:
             return _fail('guia_unavailable', f'{type(exc).__name__}: {exc}')
         try:
+            # 1.3.87：每一批发往窗口的按键之前都只读核一次前台。只在开始时抢一次前台
+            # 是不够的——真机上中途前台被 Chrome 抢走，会话名就被粘进了浏览器。
+            self._require_foreground(gui, deadline)
             self._clipboard.copy(target)
             user32 = self._win32()
             _paste_keys(user32, 0x46)            # Ctrl+F：搜索
             self._sleep(0.35)
+            self._require_foreground(gui, deadline)
             _paste_keys(user32, 0x56)            # Ctrl+V：会话名
             self._sleep(OPEN_CHAT_SEARCH_WAIT)
             # 搜索框没抢到焦点时，名字会落进输入框；此时按 Enter 等于把会话名发出去。
@@ -1440,6 +1493,8 @@ class GuiaChannel:
                 _paste_keys(user32, 0x41)        # Ctrl+A
                 _tap_key(user32, 0x2E)           # Delete
                 _tap_key(user32, 0x1B)           # Esc
+                # 1.3.87：按完 Esc 立刻回看窗口是否被这次按键弄成隐藏，是就当场恢复。
+                self._restore_hidden_after_key(gui, target)
                 log_send_phase('guia_open_chat', target, 0, reason='search_unavailable', channel='guia')
                 # 1.3.82：搜索框没抢到焦点不等于「没法打开」——用户可能在这半秒里自己点开了
                 # 目标会话。清完框再只读核一次标题，已经是目标会话就直接当成功返回，省一次失败。
@@ -1460,6 +1515,8 @@ class GuiaChannel:
                              '搜索框没有拿到焦点（会话名落进了输入框，已清掉）；这版微信可能不响应 '
                              'Ctrl+F（4.1.15 已知），已停用自动打开。请先手动点开'
                              f'「{target}」，再让机器人回复')
+            # Enter 会把搜索词发出去：猜不到前台是谁时绝不按。
+            self._require_foreground(gui, deadline)
             _tap_key(user32, 0x0D)               # Enter：打开第一条搜索结果
             self._sleep(OPEN_CHAT_RESULT_WAIT)
             title = self._verified_title(gui, deadline)
@@ -1469,9 +1526,17 @@ class GuiaChannel:
                 self._title = title
                 return None
             _tap_key(user32, 0x1B)               # Esc：退回，不进正文
+            # 1.3.87：失败前这一下 Esc 也可能让窗口消失，恢复完再退出本次打开。
+            self._restore_hidden_after_key(gui, target)
             log_send_phase('guia_open_chat', target, 0, reason='title_mismatch', channel='guia')
             return _fail('target_not_open',
                          f'自动打开后标题读到「{title or "识别失败"}」，与「{target}」不一致，本次未输入正文')
+        except _GuardFailed as exc:
+            # 前台守卫失败必须保留自己的 reason 码（foreground_lost），不能被下面的兜底
+            # 异常改写成 target_not_open；diagnostic 里带上占着前台的是谁，便于事后对账。
+            failed = _fail(exc.code, exc.detail or '前台已不是微信窗口，本次未继续按键')
+            failed.diagnostic['foreground'] = self._foreground_owner
+            return failed
         except Exception as exc:
             # 自动打开只是尽力而为：按键被系统拒收、搜索框读不出等一律降级为「本次没打开」，
             # 绝不把异常抛回发送主流程（那会变成 send_failed，掩盖真正的原因）。

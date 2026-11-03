@@ -42,6 +42,8 @@ def make_channel(titles, has_text=False):
                           user32=Mock(), clipboard=FakeClipboard())
     channel._gui = gui
     channel._foreground = lambda _gui: True
+    # 1.3.87：每个按键前的前台守卫由专门用例覆盖；这里只测按键序列。
+    channel._require_foreground = lambda *_args, **_kwargs: None
     seq = list(titles)
     channel._verified_title = lambda _gui, _deadline, signature=None: (
         seq.pop(0) if seq else '')

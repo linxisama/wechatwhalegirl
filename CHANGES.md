@@ -1,3 +1,9 @@
+## 1.3.87 隐藏窗口恢复、逐键前台守卫、14-17px 标题边界档
+
+- `src/wechat_guia_send.py` 新增 `_visible()`（`IsWindowVisible`，查询异常按可见兜底）；`_restore_minimized()` 成功条件改为「未最小化且可见」，隐藏窗口也用 `ShowWindow(..., SW_SHOWNOACTIVATE=4)` 恢复；`_restore_window_if_needed()` 与 `available()` 同时识别最小化/隐藏（reason 仍为 `minimized`，文案区分两者）；`_open_target_chat` 每次按 Esc 后检查窗口是否被按键弄成隐藏并立即恢复。
+- `_open_target_chat` 在 Ctrl+F、Ctrl+V、Enter 前分别只读核一次前台（`_require_foreground`）；中途前台丢失立即 `_fail('foreground_lost', ...)`，不再发后续按键，尤其不会在猜不到前台时按 Enter。
+- `src/wechat_pixel_gui.py` 新增 `_BOUNDARY_TITLE_PASSES`：14-17px 墨迹走 boundary 档（2x/160 nearest、2x/smooth、2.5x/150 nearest 三份逐字一致），18-24px 仍 medium、8-13px small、其余旧表不变；`_title_pass_families()` 返回 boundary + legacy 兜底，evidence 的 `profile` 可取 `boundary`。新增 `tests/test_restore_hidden1387.py` 6 例、`tests/test_open_chat_foreground1387.py` 2 例、`tests/test_title_boundary1387.py` 3 例，并同步更新恢复/打开会话/标题旧表夹具。仍为内部测试候选，不制作正式安装包。
+
 ## 1.3.86 剪贴板占用重试与恢复降级
 
 - `src/wechat_guia_send.py` 新增 `_open_clipboard(win32clipboard, budget=None, sleep=None, clock=None)`：`snapshot`/`copy`/`text` 遇到 `pywintypes.error (5, 'OpenClipboard', '拒绝访问')` 时有界重试（`CLIPBOARD_OPEN_BUDGET=1.2` 秒、首次间隔 `0.02` 秒、逐次翻倍至 `0.16` 秒），只重试 Windows API 自己的错误，替身/编程错误仍原样上抛。

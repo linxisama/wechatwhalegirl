@@ -28,11 +28,12 @@ def rows_for(ink, scale, *boxes):
             for text, left, top, right, bottom in boxes]
 
 
-def draw_glyphs(frame, left, top, count, pitch=14, size=12):
+def draw_glyphs(frame, left, top, count, pitch=14, size=12, height=26):
+    # 1.3.87 起 14-17px 走边界档，旧表用例改用 26px 墨迹（仍是 25px 以上的旧表区间）。
     draw = ImageDraw.Draw(frame)
     for index in range(count):
         x = left + index * pitch
-        draw.rectangle((x, top, x + size - 1, top + 13), fill='black')
+        draw.rectangle((x, top, x + size - 1, top + height - 1), fill='black')
 
 
 class QuietBase:

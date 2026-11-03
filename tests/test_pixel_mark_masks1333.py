@@ -54,13 +54,16 @@ class PixelMarkMaskTests(unittest.TestCase):
                 self.assertEqual(height, 0)
                 self.assertEqual(passes, tuple((s, t, 0) for s, t in pixel._TITLE_PASSES))
 
-    def test_measured_glyph_height_keeps_medium_profile_boundaries(self):
-        for height in (15, 16, 24, 25):
+    def test_measured_glyph_height_keeps_profile_boundaries(self):
+        # 1.3.87 起 14-17px 是 boundary 档，medium 下沿改为 18px；25px 以上仍是旧表。
+        for height in (14, 15, 16, 17, 18, 24, 25):
             with self.subTest(height=height), Image.new('RGB', (60, 60), 'white') as frame:
                 ImageDraw.Draw(frame).rectangle((10, 10, 20, 9+height), fill='black')
                 passes, actual = pixel._title_passes(frame, (0, 0, 60, 60))
                 self.assertEqual(actual, height)
-                if 16 <= height <= 24:
+                if 14 <= height <= 17:
+                    self.assertIs(passes, pixel._BOUNDARY_TITLE_PASSES)
+                elif 18 <= height <= 24:
                     self.assertIs(passes, pixel._MEDIUM_TITLE_PASSES)
                 else:
                     self.assertEqual(passes, tuple((s, t, 0) for s, t in pixel._TITLE_PASSES))

@@ -27,7 +27,7 @@ def medium_frame(frame=None):
 
 
 def legacy_frame():
-    """墨迹高 14px 的合成帧：仍旧走 (4,150)(6,150)(8,150) 旧表。"""
+    """墨迹高 26px 的合成帧：25px 以上仍旧走 (4,150)(6,150)(8,150) 旧表。"""
     image = fixture.fixture_frame()
     fixture.draw_glyphs(image, 330, 20, 5)
     return image
@@ -149,7 +149,7 @@ class MediumTitleTests(unittest.TestCase):
         with legacy_frame() as frame:
             ink = _title_ink_region(frame, BAND)
             passes, height = _title_passes(frame, ink)
-            self.assertEqual(height, 14)
+            self.assertEqual(height, 26)
             self.assertEqual(passes, ((4, 150, 0), (6, 150, 0), (8, 150, 0)))
             self.assertEqual([variant[3] for variant in _pass_variants(passes)],
                              ['nearest', 'nearest', 'nearest'])

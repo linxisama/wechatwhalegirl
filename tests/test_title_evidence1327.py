@@ -61,7 +61,7 @@ class TitleEvidenceTests(unittest.TestCase):
         with fixture.fixture_frame() as frame:
             fixture.draw_glyphs(frame, 330, 20, 5)
             passes, height = _title_passes(frame, _title_ink_region(frame, fixture.BAND))
-            self.assertEqual(height, 14)
+            self.assertEqual(height, 26)
             self.assertEqual(passes, ((4, 150, 0), (6, 150, 0), (8, 150, 0)))
 
     def test_fractional_inverse_uses_rounded_dimensions_and_excludes_white_padding(self):

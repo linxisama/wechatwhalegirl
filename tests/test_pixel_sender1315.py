@@ -357,8 +357,9 @@ class PixelGUIProtectionTests(unittest.TestCase):
         provider.recognize.return_value = [('Alice', 40, 32, 104, 60)]
         with fixture_frame() as frame:
             draw = ImageDraw.Draw(frame)
-            draw.rectangle((330, 40, 355, 55), fill='black')
-            draw.rectangle((600, 40, 610, 55), fill='black')
+            # 1.3.87 起 14-17px 走边界档；本用例锁 18px 及以上的 medium 行为，故画 18px 墨迹。
+            draw.rectangle((330, 40, 355, 57), fill='black')
+            draw.rectangle((600, 40, 610, 57), fill='black')
             gui = self.make_gui(frame, provider)
             self.assertEqual(gui.current_chat_title(), '')
         # 空读数不再短路，因此断言的是本次真的会尝试的变体（按表长度求和，不写死数字）：

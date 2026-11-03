@@ -87,6 +87,7 @@ class ChannelRestoreTests(unittest.TestCase):
     def test_minimized_window_is_restored_and_logged(self):
         channel = self.make()
         with patch('src.wechat_guia_send._iconic', return_value=True), \
+                patch('src.wechat_guia_send._visible', return_value=True), \
                 patch('src.wechat_guia_send._restore_minimized', return_value=True) as restore, \
                 patch('src.wechat_guia_send.log_send_phase') as log:
             self.assertTrue(channel._restore_window_if_needed(FakeGui()))
@@ -95,9 +96,23 @@ class ChannelRestoreTests(unittest.TestCase):
         self.assertEqual(log.call_args[0][0], 'guia_restore_window')
         self.assertIn('已自动恢复', log.call_args[0][3])
 
+    def test_hidden_window_is_restored_and_logged(self):
+        channel = self.make()
+        with patch('src.wechat_guia_send._iconic', return_value=False), \
+                patch('src.wechat_guia_send._visible', return_value=False), \
+                patch('src.wechat_guia_send._restore_minimized', return_value=True) as restore, \
+                patch('src.wechat_guia_send.log_send_phase') as log:
+            self.assertTrue(channel._restore_window_if_needed(FakeGui()))
+        self.assertEqual(restore.call_args[0][0], 1234)
+        log.assert_called_once()
+        self.assertEqual(log.call_args[0][0], 'guia_restore_window')
+        self.assertIn('隐藏', log.call_args[0][3])
+        self.assertIn('已自动恢复', log.call_args[0][3])
+
     def test_visible_window_touches_nothing(self):
         channel = self.make()
         with patch('src.wechat_guia_send._iconic', return_value=False), \
+                patch('src.wechat_guia_send._visible', return_value=True), \
                 patch('src.wechat_guia_send._restore_minimized') as restore, \
                 patch('src.wechat_guia_send.log_send_phase') as log:
             self.assertTrue(channel._restore_window_if_needed(FakeGui()))
@@ -107,6 +122,7 @@ class ChannelRestoreTests(unittest.TestCase):
     def test_restore_failure_is_reported_not_swallowed(self):
         channel = self.make()
         with patch('src.wechat_guia_send._iconic', return_value=True), \
+                patch('src.wechat_guia_send._visible', return_value=True), \
                 patch('src.wechat_guia_send._restore_minimized', return_value=False), \
                 patch('src.wechat_guia_send.log_send_phase') as log:
             self.assertFalse(channel._restore_window_if_needed(FakeGui()))
