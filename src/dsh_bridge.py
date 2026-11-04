@@ -136,12 +136,19 @@ def install_preset(data_root, home=None, profile='desktop'):
     if not folder.is_dir():
         raise DshError('所选DSH profile不存在，不创建陌生profile')
     modules = [folder / 'node_modules/@deepseek-ai', folder.parent / 'node_modules/@deepseek-ai']
-    modern = any((p / 'dsh-agent-preset').is_dir() for p in modules)
+    # 人设依赖在不同DSH版本/安装形态下会落在 dsh-agent-preset（单数，本机0.1.7实测包名）
+    # 或 dsh-agent-presets（复数）；任一存在都说明人设按cordis.patch.yml声明。只认一种会把
+    # 另一种机器误判成老机制，去写新版DSH已经不读的~/.dsh/.agent-presets目录（asar文档原话：
+    # "Nothing reads that directory any more."），结果控制台一直显示已连接但stage=preset_missing。
+    modern = any(((p / 'dsh-agent-presets').is_dir() or (p / 'dsh-agent-preset').is_dir()) for p in modules)
     legacy = any((p / 'dsh-agent-presets').is_dir() for p in modules)
     if not modern and not legacy:
-        raise DshError('无法确认本机DSH人设机制，未修改DSH；请检查所选profile和依赖')
+        raise DshError('无法确认本机DSH人设机制，未修改DSH；请检查所选profile和依赖'
+                       '（找不到 @deepseek-ai/dsh-agent-preset(s)，请确认 DSH profile 依赖已安装）')
     if not modern:
-        # 本机仍有0.1.5目录人设；不能把0.2.x的插件行写进去导致DSH启动失败。
+        # 注意：modern 的判据已包含 legacy（复数也算现代），所以这条目录分支目前不可达；保留写法给
+        # 确实只有目录机制、连 preset 依赖包都没有的老机器，需要时把"两者都不存在"路由到这里即可。
+        # 不能把0.2.x的插件行写进目录，会导致DSH启动失败。
         from .persistence import atomic_text
         target = home / '.agent-presets' / PRESET
         target.mkdir(parents=True, exist_ok=True)

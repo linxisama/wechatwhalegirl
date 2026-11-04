@@ -18,6 +18,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from .runtime_identity import APP_VERSION
+from .site_profile import _resolve_wsb_exe
 from . import sandbox_acl_recovery as acl_recovery
 from .private_directory import create_private_directory
 
@@ -270,19 +271,20 @@ def _prepare_program(root, app_dir):
 
 
 def find_wsb():
-    """只使用 Windows 的固定 CLI 位置，避免从任意 PATH 程序启动。"""
-    candidates = []
-    if os.environ.get('SystemRoot'):
-        candidates.append(Path(os.environ['SystemRoot']) / 'System32' / 'wsb.exe')
-    if os.environ.get('LOCALAPPDATA'):
-        candidates.append(Path(os.environ['LOCALAPPDATA']) / 'Microsoft' / 'WindowsApps' / 'wsb.exe')
-    for path in candidates:
-        try:
-            if path.is_file():
-                return _reject_links(path, allow_app_alias=True)
-        except OSError:
-            continue
-    raise SandboxError('未找到 Windows Sandbox 命令行，请先启用并打开 Windows 沙盒')
+    r"""找 wsb.exe，复用 site_profile._resolve_wsb_exe，避免两处面板口径打架。
+
+    1.3.88 修：这里原来自己拼 System32 + WindowsApps 两个候选，既漏了 Known Folder
+    和 PATH，又让 /api/sandbox/status 与 /api/sandbox/provision/status 各说各话。
+    解析器本身仍只认固定位置，不执行 PATH 里的任意同名程序。
+    """
+    path, exists, _source = _resolve_wsb_exe()
+    if exists:
+        # 解析器只做 is_file 判定，符号链接/重解析点还要在这里拦一次
+        return _reject_links(Path(path), allow_app_alias=True)
+    raise SandboxError(
+        '本机找不到 wsb.exe：可能没启用 Windows 沙盒，也可能是没有沙盒组件的 Windows 10 版本'
+        '（那种机器只带 WindowsSandbox.exe）。先看 /api/sandbox/provision/status 给出的判定和'
+        '建议；还是查不出来就跑仓库根目录的「沙盒诊断.bat」收集证据。')
 
 
 def _run_wsb(arguments, *, timeout=20):

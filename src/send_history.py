@@ -1,19 +1,26 @@
 # -*- coding: utf-8 -*-
-"""发送记录只读解析：从后台日志尾部提取 phase / failed / timing 三类行。
+"""发送记录只读解析：从按天事件文件读 phase / failed，从后台日志尾部读 timing。
 
 设计约束（有意为之）：
-- 只读日志**尾部**（走 jsonl_tail.tail_lines），绝不整文件读；日志再大也只读最后几千行；
+- 阶段与失败走 logging_setup 按天落盘的 send-events-*.jsonl：backend.log 5MB 就轮换，
+  只读日志尾部会把更早的失败挤出窗口，事件文件保留 7 天、失败不会被耗时行挤掉；
+- 耗时仍只从日志**尾部**读（走 jsonl_tail.tail_lines），绝不整文件读；
 - 只解析、不判断成败、不落盘、不碰微信；解析不出来就跳过，绝不抛；
-- 日志里会话名已被 mask_chat_name 打码、正文只有 len=，这里不做任何还原。
+- 会话名已被 mask_chat_name 打码、正文只有 len=，这里不做任何还原。
 """
 from __future__ import annotations
 
+import datetime
+import json
 import re
+from pathlib import Path
 
 try:  # 包内导入（from . import send_history）
     from . import jsonl_tail
+    from .logging_setup import SEND_EVENT_KEEP_DAYS, SEND_EVENT_PREFIX, SEND_EVENT_SUFFIX
 except ImportError:  # 源码直跑
     import jsonl_tail  # type: ignore
+    from logging_setup import SEND_EVENT_KEEP_DAYS, SEND_EVENT_PREFIX, SEND_EVENT_SUFFIX  # type: ignore
 
 TS_RE = re.compile(r'^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})')
 KINDS = ('phase', 'failed', 'timing')
@@ -155,16 +162,115 @@ def parse_lines(lines):
     return out
 
 
-def recent(path, limit=50):
-    """日志尾部最近 limit 条发送记录（按时间升序）。文件不存在/读失败返回 []。"""
+def clamp_limit(limit, default=50):
+    """limit 语义与 recent 保持一致：越界一律回落默认值，不按上下限截断。"""
     try:
         wanted = int(limit)
     except (TypeError, ValueError):
-        wanted = 50
-    keep = wanted if 1 <= wanted <= 200 else 50
+        return default
+    return wanted if 1 <= wanted <= 200 else default
+
+
+def recent(path, limit=50):
+    """日志尾部最近 limit 条发送记录（按时间升序）。文件不存在/读失败返回 []。"""
+    keep = clamp_limit(limit)
     # 一条真实发送会产生 10~20 行阶段记录，尾部取 30 倍足够覆盖 limit 条。
     lines = jsonl_tail.tail_lines(path, max(400, keep * 30))
     return parse_lines(lines)[-keep:]
+
+
+def event_days(days=SEND_EVENT_KEEP_DAYS):
+    """最近 days 天的日期串（'YYYY-MM-DD'），从今天往前；越界回落保留天数。"""
+    try:
+        span = int(days)
+    except (TypeError, ValueError):
+        span = SEND_EVENT_KEEP_DAYS
+    if not 1 <= span <= 60:
+        span = SEND_EVENT_KEEP_DAYS
+    today = datetime.date.today()
+    return [(today - datetime.timedelta(days=offset)).isoformat() for offset in range(span)]
+
+
+def event_paths(folder, days=SEND_EVENT_KEEP_DAYS):
+    """最近 days 天的事件文件，从新到旧；只拼路径不探测磁盘。"""
+    if folder is None:
+        return []
+    base = Path(folder)
+    return [base / f"{SEND_EVENT_PREFIX}{day}{SEND_EVENT_SUFFIX}" for day in event_days(days)]
+
+
+def parse_event(text):
+    """一行事件 JSON -> 记录 dict；坏行、非对象、非发送记录都返回 None。"""
+    if not isinstance(text, str):
+        return None
+    text = text.strip()
+    if not text:
+        return None
+    try:
+        row = json.loads(text)
+    except (ValueError, TypeError, RecursionError):
+        return None
+    if not isinstance(row, dict) or row.get('kind') not in ('phase', 'failed'):
+        return None
+    record = {'ts': str(row.get('ts') or ''), 'kind': row['kind']}
+    if record['kind'] == 'phase':
+        record.update({
+            'phase': str(row.get('phase') or ''),
+            'who': str(row.get('who') or ''),
+            'len': _int(row.get('len')),
+            'reason': str(row.get('reason') or ''),
+            'channel': str(row.get('channel') or ''),
+            'pid': _int(row.get('pid')),
+        })
+    else:
+        reason = str(row.get('reason') or '')
+        record.update({
+            'reason': reason,
+            'who': str(row.get('who') or ''),
+            'len': _int(row.get('len')),
+            'channel': str(row.get('channel') or ''),
+            'title': str(row.get('title') or ''),
+            'hint': str(row.get('hint') or ''),
+            'foreground': str(row.get('foreground') or ''),
+            'pid': _int(row.get('pid')),
+            'text': describe(reason),
+            'advice': hint_for(reason),
+        })
+    return record
+
+
+def recent_events(folder, limit=50, days=SEND_EVENT_KEEP_DAYS):
+    """按天事件文件里最近 limit 条阶段 + 最近 limit 条失败（按时间升序）。
+
+    阶段与失败各留各的窗口：一次真实发送会产生十几条阶段记录，若共用一个窗口，
+    失败记录几十次发送后就被挤没了——这正是要修的那个缺陷。
+    累积方向必须是整体从新到旧：文件从新到旧遍历，但单个文件里的行是追加写入的
+    （旧->新），所以每读一天要先把它反转成新->旧，再接在已收集记录**之后**，
+    列表头部才是全局最新的一条。少了这次反转，[:keep] 取到的是当天最早的 keep 条，
+    面板「最近 50 条」在一天发到第 4 次左右就永久冻结在当天最早的几次发送上。
+    文件不存在/读不动/行损坏一律跳过，绝不抛。
+    """
+    keep = clamp_limit(limit)
+    phases, failures = [], []
+    try:
+        paths = event_paths(folder, days)
+    except BaseException:
+        return []
+    for path in paths:
+        day_phases, day_failures = [], []
+        for line in jsonl_tail.iter_lines(path):
+            record = parse_event(line)
+            if record is None:
+                continue
+            (day_phases if record['kind'] == 'phase' else day_failures).append(record)
+        # 文件从新到旧遍历：当天记录反转成新->旧后接在已收集记录之后，头部恒为最新。
+        # 读够 keep 条就不再翻更早的天（面板每 15 秒刷一次，早停不能丢）。
+        phases.extend(reversed(day_phases))
+        failures.extend(reversed(day_failures))
+        if len(phases) >= keep and len(failures) >= keep:
+            break
+    rows = phases[:keep] + failures[:keep]
+    return sorted(rows, key=lambda row: row.get('ts') or '')
 
 
 def summarize(items):

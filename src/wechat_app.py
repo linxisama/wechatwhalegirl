@@ -2599,12 +2599,19 @@ def create_app(runtime=None):
 
     @app.get('/api/send/history')
     async def send_history(limit: int = 50):
-        """最近的发送阶段与失败记录（只读日志尾部，不落正文）。"""
+        """最近的发送阶段/失败/耗时记录（只读本机记录，不落正文）。
+
+        阶段与失败读按天事件文件（保留 7 天），耗时仍读 backend.log 尾部：
+        日志 5MB 就轮换，只读日志尾部会让更早的失败查不到。
+        """
         require_bound(app.state.bot)
         from . import logging_setup, send_history as send_history_mod
+        events = send_history_mod.recent_events(logging_setup.send_event_dir(), limit)
         path = logging_setup.backend_log_path() or (app.state.bot.root / 'logs' / 'backend.log')
-        items = send_history_mod.recent(path, limit)
-        return {'ok': True, **send_history_mod.summarize(items), 'items': items}
+        timings = [row for row in send_history_mod.recent(path, limit) if row.get('kind') == 'timing']
+        items = sorted(events + timings, key=lambda row: row.get('ts') or '')
+        keep = send_history_mod.clamp_limit(limit)
+        return {'ok': True, **send_history_mod.summarize(events + timings), 'items': items[-keep:]}
 
     @app.middleware("http")
     async def local_admin(request: Request, call_next):

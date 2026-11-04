@@ -1,5 +1,7 @@
-"""只读的发送诊断（1.3.85）：从后台日志尾部看最近发送阶段、失败原因与耗时。
+"""只读的发送诊断（1.3.85）：看最近发送阶段、失败原因与耗时。
 
+数据来源（1.3.88）：阶段/失败读按天保存的事件文件（保留 7 天），耗时仍读后台日志尾部——
+backend.log 满 5MB 就轮转，只读日志尾部会把十几分钟前的失败冲掉。
 边界：只发一个 GET，不重发、不清草稿、不改任何设置；日志里的会话名本来就是打码的。
 """
 from PyQt6.QtCore import QTimer
@@ -24,7 +26,7 @@ class SendPanel(QWidget):
         self.busy=False
         self.data={}
         box=QVBoxLayout(self)
-        hint=QLabel('这里只读：最近 50 条发送记录（阶段 / 失败 / 耗时），全部取自本机后台日志尾部；'
+        hint=QLabel('这里只读：最近 50 条发送记录（阶段 / 失败 / 耗时），取自本机按天保存的发送记录（保留 7 天）；'
                     '不会重发、不清草稿、不改设置。日志里的会话名与标题本来就是打码的。')
         hint.setWordWrap(True)
         box.addWidget(hint)
@@ -140,7 +142,7 @@ class SendPanel(QWidget):
             if last.get('advice'):
                 text+='\n建议：'+str(last.get('advice'))
         else:
-            text='最近一次失败：无（日志尾部没有失败记录）'
+            text='最近一次失败：无（最近 7 天的发送记录里没有失败）'
         self.failure.setText(text)
         self.text.setPlainText('\n'.join(self.lines()))
         self.notice.setText('已更新（只读）')

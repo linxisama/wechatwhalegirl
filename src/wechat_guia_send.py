@@ -1184,7 +1184,8 @@ class GuiaChannel:
         if cleared:
             return
         raise _GuardFailed('draft_not_empty',
-                           '输入框里的草稿自动清空失败，本次未输入；请手动核对')
+                           '输入框里的草稿自动清空失败，本次未输入；'
+                           '请手动点进输入框按 Ctrl+A 再 Delete 后重试')
 
     @staticmethod
     def _composer_ink(gui, box):
@@ -1234,7 +1235,8 @@ class GuiaChannel:
 
     @staticmethod
     def _ink_cleared(ink, before_ink=None):
-        """一帧墨迹是否已经算清空：空、或只剩光标、或光标态下墨迹确实变少。"""
+        """一帧墨迹是否已经算清空：空、或只剩光标、或墨迹掉到四成以下只剩 <=2 列、
+        或光标态下墨迹确实变少。第三条与 composer_cleared 的同名判据必须一致。"""
         if not isinstance(ink, dict) or 'pixels' not in ink:
             return False
         state = ink.get('state')
@@ -1246,6 +1248,11 @@ class GuiaChannel:
             return True
         before_pixels = int((before_ink or {}).get('pixels') or 0)
         limit = max(2, int(0.3 * before_pixels))
+        # 真机 Delete 之后那一帧常被 draft_state 判成 'text'（光标层常驻位图），
+        # 上面两条都不成立；墨迹掉到四成以下且只剩 <=2 个竖列，只可能是光标或极少量
+        # 残影，与 composer_cleared 的第 3 条判据同形，两处必须一致。
+        if pixels <= max(2, int(0.4 * before_pixels)) and columns <= 2:
+            return True
         return bool(state == 'caret_like' and pixels < before_pixels
                     and (columns <= 2 or pixels <= limit))
 

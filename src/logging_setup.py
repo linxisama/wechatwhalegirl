@@ -5,7 +5,9 @@
 （同 wechat_gui.py 里"日志功能不能因此中断工作循环"的约定）。
 """
 import logging
+import datetime
 import hashlib
+import json
 import os
 import re
 import sys
@@ -328,6 +330,12 @@ SEND_PHASE_CODES = (
 )
 SEND_CHANNELS = ('uia', 'guia')
 SEND_NAME_KEEP = 8
+# 发送事件文件：backend.log 5MB 就轮换，失败记录几十次发送后就被冲掉；
+# 这里按天单独落一份、只留 7 天，让「发送诊断」在日志翻篇后仍查得到历史失败。
+SEND_EVENT_PREFIX = 'send-events-'
+SEND_EVENT_SUFFIX = '.jsonl'
+SEND_EVENT_KEEP_DAYS = 7
+_SEND_EVENT_PRUNE_DAY = None
 
 
 def mask_chat_name(who) -> str:
@@ -349,23 +357,111 @@ def _send_logger():
     return logging.getLogger(RUNTIME_LOGGER_NAME)
 
 
+def _event_ts() -> str:
+    """事件行自带时间戳：日志行的时间戳由 formatter 加，JSONL 里必须自己写。"""
+    return time.strftime('%Y-%m-%d %H:%M:%S')
+
+
+def send_phase_record(phase, who='', length=0, reason='', channel='uia') -> dict:
+    """阶段记录：日志行与事件行共用这一份字段，两边不会漂移。"""
+    return {
+        'ts': _event_ts(),
+        'kind': 'phase',
+        'phase': _send_field(phase),
+        'who': mask_chat_name(who),
+        'len': int(length),
+        'reason': _send_field(reason, ''),
+        'channel': _send_field(channel),
+        'pid': os.getpid(),
+    }
+
+
 def send_phase_line(phase, who='', length=0, reason='', channel='uia') -> str:
     """单行、机器可读的阶段记录：正文只以 len= 出现，绝不写原文。"""
-    return (f"send phase={_send_field(phase)} who={mask_chat_name(who)} "
-            f"len={int(length)} reason={_send_field(reason, '')} "
-            f"channel={_send_field(channel)} pid={os.getpid()}")
+    row = send_phase_record(phase, who, length, reason, channel)
+    return (f"send phase={row['phase']} who={row['who']} "
+            f"len={row['len']} reason={row['reason']} "
+            f"channel={row['channel']} pid={row['pid']}")
+
+
+def send_failure_record(reason, who='', length=0, channel='uia', hint='', title='',
+                        foreground='') -> dict:
+    """失败记录：字段与 send_failure_line 完全一致（正文仍然只有 len=）。"""
+    row = {
+        'ts': _event_ts(),
+        'kind': 'failed',
+        'reason': _send_field(reason),
+        'who': mask_chat_name(who),
+        'len': int(length),
+        'channel': _send_field(channel),
+        'title': _send_field(mask_chat_name(title) if title else '', ''),
+        'hint': _send_field(hint, ''),
+        'pid': os.getpid(),
+    }
+    if foreground:
+        row['foreground'] = _send_field(foreground)
+    return row
 
 
 def send_failure_line(reason, who='', length=0, channel='uia', hint='', title='',
                       foreground='') -> str:
     """失败摘要行：GUI 的 extract_error_blocks 就是靠这种单行 ERROR 找出来的。"""
-    line = (f"send failed channel={_send_field(channel)} reason={_send_field(reason)} "
-            f"who={mask_chat_name(who)} len={int(length)} "
-            f"title={_send_field(mask_chat_name(title) if title else '', '')} "
-            f"hint={_send_field(hint, '')}")
-    if foreground:
-        line += f" foreground={_send_field(foreground)}"
-    return line + f" pid={os.getpid()}"
+    row = send_failure_record(reason, who, length, channel, hint, title, foreground)
+    line = (f"send failed channel={row['channel']} reason={row['reason']} "
+            f"who={row['who']} len={row['len']} "
+            f"title={row['title']} "
+            f"hint={row['hint']}")
+    if row.get('foreground'):
+        line += f" foreground={row['foreground']}"
+    return line + f" pid={row['pid']}"
+
+
+def send_event_dir() -> Path:
+    """发送事件目录：与 backend.log 同目录，日志轮转也不会带走这些文件。"""
+    return backend_log_dir()
+
+
+def send_event_path(day=None) -> Path:
+    """当天的事件文件；day 传 'YYYY-MM-DD'，缺省今天。"""
+    stamp = str(day or time.strftime('%Y-%m-%d'))
+    return send_event_dir() / f"{SEND_EVENT_PREFIX}{stamp}{SEND_EVENT_SUFFIX}"
+
+
+def _prune_send_events(today=None) -> None:
+    """每天最多清一次：删掉早于 today-(保留天数-1) 的事件文件，任何失败都静默。"""
+    global _SEND_EVENT_PRUNE_DAY
+    day = str(today or time.strftime('%Y-%m-%d'))
+    if _SEND_EVENT_PRUNE_DAY == day:
+        return
+    # 先记日期再动手：磁盘坏了也只当今天清过，不在每次发送时反复重试。
+    _SEND_EVENT_PRUNE_DAY = day
+    try:
+        oldest = datetime.date.fromisoformat(day) - datetime.timedelta(days=SEND_EVENT_KEEP_DAYS - 1)
+        for path in send_event_dir().glob(f"{SEND_EVENT_PREFIX}*{SEND_EVENT_SUFFIX}"):
+            stamp = path.name[len(SEND_EVENT_PREFIX):-len(SEND_EVENT_SUFFIX)]
+            try:
+                when = datetime.date.fromisoformat(stamp)
+            except ValueError:
+                continue  # 名字里不是日期的一律不碰
+            if when < oldest:
+                path.unlink()
+    except BaseException:
+        return
+
+
+def append_send_event(record) -> bool:
+    """把一条阶段/失败记录追加到当天事件文件；任何异常都吞掉，绝不连累发送。"""
+    try:
+        line = json.dumps(dict(record or {}), ensure_ascii=False)
+        path = send_event_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, 'a', encoding='utf-8', newline='\n') as stream:
+            stream.write(line + '\n')
+            stream.flush()
+    except BaseException:
+        return False
+    _prune_send_events()
+    return True
 
 
 def log_send_phase(phase, who='', length=0, reason='', channel='uia') -> bool:
@@ -373,6 +469,7 @@ def log_send_phase(phase, who='', length=0, reason='', channel='uia') -> bool:
     try:
         restore_backend_handler()
         _send_logger().info(send_phase_line(phase, who, length, reason, channel))
+        append_send_event(send_phase_record(phase, who, length, reason, channel))
         return True
     except BaseException:
         return False
@@ -386,6 +483,8 @@ def log_send_failure(reason, who='', length=0, channel='uia', hint='', title='',
         _send_logger().log(logging.ERROR if level is None else int(level),
                            send_failure_line(reason, who, length, channel, hint, title,
                                              foreground))
+        append_send_event(send_failure_record(reason, who, length, channel, hint, title,
+                                              foreground))
         return True
     except BaseException:
         return False

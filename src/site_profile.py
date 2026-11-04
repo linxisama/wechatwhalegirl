@@ -4,7 +4,7 @@
 
 **硬约束**：绝不调用任何「设置进程 DPI 感知」的 API。那一族函数会把整个控制台进程切到
 另一套 DPI 虚拟化，坐标通道和截图尺寸会跟着变 —— 等于探测把被测对象改坏了。本模块只读：
-只用 GetDpiForSystem / GetDpiForWindow 取 DPI，绝不往系统里写任何进程级状态。
+只用 GetDpiForWindow / GetDpiForMonitor / GetDpiForSystem 取 DPI，绝不往系统里写任何进程级状态。
 
 七项探测各自独立 try：任何一项抛异常都降级成 status='unknown'，绝不让 HTTP 接口 500。
 返回值里不出现用户名、wxid、聊天内容——窗口标题只在确认是「微信主窗口默认标题」时才带出。
@@ -85,29 +85,75 @@ def data_root():
 
 
 # ── 1. DPI 与缩放 ─────────────────────────────────────────────────────────────
-def _probe_scale():
-    user32 = ctypes.WinDLL('user32', use_last_error=True)
-    system_dpi = int(user32.GetDpiForSystem())
-    if not system_dpi:
-        raise RuntimeError('GetDpiForSystem 返回 0')
-    # 取前台窗口的 DPI 只用于对照：探测跑在 HTTP 线程里，拿不到本进程的 Qt 窗口句柄
-    hwnd = int(user32.GetForegroundWindow() or 0)
-    window_dpi = None
-    if hwnd:
+# GetDpiForMonitor 的第二个参数：MDT_EFFECTIVE_DPI，要当前生效的缩放而不是出厂值
+_MDT_EFFECTIVE_DPI = 0
+_MONITOR_DEFAULTTONEAREST = 2
+
+
+def _foreground_dpi(user32, hwnd):
+    """取前台窗口的实测 DPI，返回 (dpi, 来源)；取不到时返回 (None, '')。
+
+    1.3.88 修：GetDpiForWindow 一直挂在 user32 上，旧代码去 shcore 里找，
+    于是每次 AttributeError 都被当成「老系统没有这个 API」，窗口 DPI 永远是 None，
+    最后静默退回系统 DPI —— 144 DPI 的机器上被报成 100%。这里按真实归属分三级。
+    """
+    if not hwnd:
+        return None, ''
+    try:
+        dpi = int(user32.GetDpiForWindow(ctypes.c_void_p(hwnd)))
+        if dpi > 0:
+            return dpi, 'window'
+    except (OSError, AttributeError, ValueError, TypeError):
+        pass  # Win10 1607 以前没有这个 API，往下一级退
+    try:
+        # GetDpiForMonitor 要的是 HMONITOR，不是 HWND；按窗口找到最近的显示器
+        monitor = int(user32.MonitorFromWindow(ctypes.c_void_p(hwnd), _MONITOR_DEFAULTTONEAREST) or 0)
+    except (OSError, AttributeError, ValueError, TypeError):
+        monitor = 0
+    if monitor:
         try:
             shcore = ctypes.WinDLL('shcore', use_last_error=True)
-            window_dpi = int(shcore.GetDpiForWindow(ctypes.c_void_p(hwnd))) or None
-        except (OSError, AttributeError):
-            window_dpi = None  # Win10 1607 以前没有这个 API，跳过即可
-    dpi = window_dpi or system_dpi
+            dpi_x, dpi_y = ctypes.c_uint(0), ctypes.c_uint(0)
+            if shcore.GetDpiForMonitor(ctypes.c_void_p(monitor), _MDT_EFFECTIVE_DPI,
+                                       ctypes.byref(dpi_x), ctypes.byref(dpi_y)) == 0:
+                if int(dpi_x.value) > 0:
+                    return int(dpi_x.value), 'monitor'
+        except (OSError, AttributeError, ValueError, TypeError):
+            pass
+    return None, ''
+
+
+def _probe_scale():
+    user32 = ctypes.WinDLL('user32', use_last_error=True)
+    # 取前台窗口的 DPI 只用于对照：探测跑在 HTTP 线程里，拿不到本进程的 Qt 窗口句柄
+    hwnd = int(user32.GetForegroundWindow() or 0)
+    window_dpi, source = _foreground_dpi(user32, hwnd)
+    system_dpi = None
+    if window_dpi is None:
+        try:
+            system_dpi = int(user32.GetDpiForSystem()) or None
+        except (OSError, AttributeError, ValueError, TypeError):
+            system_dpi = None
+        if not system_dpi:
+            # 三个来源都没数：宁可报 unknown，也不许拿 96 凑出一个 100%
+            raise RuntimeError('GetDpiForWindow / GetDpiForMonitor / GetDpiForSystem 都没给出 DPI')
+        window_dpi, source = system_dpi, 'system'
+    dpi = int(window_dpi)
     scale = round(dpi / 96.0, 2)
     percent = int(round(scale * 100))
-    data = {'system_dpi': system_dpi, 'window_dpi': window_dpi,
+    data = {'dpi': dpi, 'dpi_source': source, 'system_dpi': system_dpi,
+            'window_dpi': window_dpi if source != 'system' else None,
             'scale': scale, 'scale_percent': percent}
+    if source == 'system':
+        # 兜底值说的是系统缩放，和微信窗口的实际缩放可能不一致，所以即便 100% 也只报 warn
+        return _item('scale', 'warn',
+                     f'系统 DPI 兜底（没取到前台窗口的实测值）：缩放 {percent}%（DPI {dpi}），'
+                     f'坐标要按 {scale} 倍核对，像素通道可能点偏', data)
+    where = '窗口实测' if source == 'window' else '窗口所在显示器实测'
     if percent == 100:
-        return _item('scale', 'ok', f'系统缩放 100%（DPI {dpi}），坐标通道不用换算', data)
+        return _item('scale', 'ok', f'{where}缩放 100%（DPI {dpi}），坐标通道不用换算', data)
     return _item('scale', 'warn',
-                 f'系统缩放 {percent}%（DPI {dpi}），坐标要按 {scale} 倍换算，像素通道在非 100% 缩放下容易点偏', data)
+                 f'{where}缩放 {percent}%（DPI {dpi}），坐标要按 {scale} 倍换算，像素通道在非 100% 缩放下容易点偏', data)
 
 
 # ── 2. 屏幕与工作区 ───────────────────────────────────────────────────────────

@@ -471,7 +471,11 @@ def readonly_gui_class(base):
             判据任一成立即算清空：
               1) state == 'empty'：光标这一帧确实熄灭，位图里没有墨迹；
               2) state == 'caret_like' 且墨迹确实比按下发送键前少，且 columns <= 2
-                 （只剩光标那么窄）或 pixels 降到 max(2, 30%) 以内。
+                 （只剩光标那么窄）或 pixels 降到 max(2, 30%) 以内；
+              3) 不论 state 是什么，pixels 降到 max(2, 40%) 以内且 columns <= 2：
+                 真机 Delete 之后那一帧常被 draft_state 判成 'text'（光标层常驻位图），
+                 前两条都不成立，明明清空了还判残留；墨迹掉到四成以下且只剩 <=2 个
+                 竖列，只可能是光标或极少量残影，与 _ink_cleared 的同一条判据一致。
             第 2 条要求"确实比按键前少"，是因为单独一个标点（'.'、'。'）粘贴后
             draft_state 也可能给出 'caret_like'：它按键前后墨迹一样多，drop 判据不
             成立，不能被当成已清空——原先"只认闪灭帧"想保住的正是这条底线。
@@ -484,6 +488,7 @@ def readonly_gui_class(base):
             """
             before_pixels = max(0, int((before or {}).get('pixels') or 0))
             limit = max(2, int(0.3 * before_pixels))
+            drop_limit = max(2, int(0.4 * before_pixels))
             deadline = time.monotonic() + max(0.0, float(window))
             pending = first_ink if isinstance(first_ink, dict) else None
             while True:
@@ -495,6 +500,8 @@ def readonly_gui_class(base):
                     return True
                 if (ink['state'] == 'caret_like' and ink['pixels'] < before_pixels
                         and (ink['columns'] <= 2 or ink['pixels'] <= limit)):
+                    return True
+                if ink['pixels'] <= drop_limit and ink['columns'] <= 2:
                     return True
                 if time.monotonic() >= deadline:
                     return False

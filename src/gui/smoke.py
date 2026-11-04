@@ -183,6 +183,7 @@ def _run_backend_checks(root: Path) -> dict:
     assert collector.push({'type': 'turn/end', 'data': {'turn': 'offline', 'reason': {'kind': 'completed'}}}) == '离线答复'
     profile_home = root / 'smoke_dsh_home'
     (profile_home / 'profiles' / 'desktop').mkdir(parents=True, exist_ok=True)
+    # 按本机DSH真实包名（单数）造依赖目录，才能验到cordis.patch.yml这条分支。
     (profile_home / 'profiles/desktop/node_modules/@deepseek-ai/dsh-agent-preset').mkdir(parents=True, exist_ok=True)
     installed_dsh = install_preset(root, profile_home)
     assert installed_dsh['success'] and PRESET in Path(installed_dsh['path']).read_text('utf-8')

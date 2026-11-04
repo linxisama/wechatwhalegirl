@@ -204,5 +204,65 @@ class AutoClearDraftInkTests(unittest.TestCase):
         self.assertFalse(channel._draft_cleared)
 
 
+
+class DropCriterionTests(unittest.TestCase):
+    """1.3.88 缺陷 1：真机 Delete 之后那一帧被判成 'text'，两条旧判据都不成立。
+
+    新增第三条判据（与 composer_cleared 同形）：不论 state，墨迹掉到原来 40% 以下且
+    只剩 <=2 个竖列就算清空。这里同时钉住「只降 10%、还剩 8 列」必须继续拒绝。
+    """
+
+    def test_text_state_dropping_to_a_quarter_with_one_column_is_cleared(self):
+        before = {'pixels': 120, 'columns': 12, 'state': 'text'}
+        after = {'pixels': 30, 'columns': 1, 'state': 'text'}      # 25%，只剩光标列
+        self.assertTrue(GuiaChannel._ink_cleared(after, before))
+
+    def test_ten_percent_drop_with_eight_columns_still_refuses(self):
+        before = {'pixels': 120, 'columns': 12, 'state': 'text'}
+        after = {'pixels': 108, 'columns': 8, 'state': 'text'}     # 只降 10%，还有 8 列
+        self.assertFalse(GuiaChannel._ink_cleared(after, before))
+
+    def test_quarter_drop_with_many_columns_still_refuses(self):
+        # 单独钉住「必须同时 columns <= 2」这半个条件：墨迹确实掉到 25%，但还剩下
+        # 8 个竖列，那是一片真实的短草稿，不能被当成光标放行。
+        before = {'pixels': 120, 'columns': 12, 'state': 'text'}
+        after = {'pixels': 30, 'columns': 8, 'state': 'text'}      # 25%，但有 8 列
+        self.assertFalse(GuiaChannel._ink_cleared(after, before))
+
+    def test_empty_and_caret_like_branches_do_not_regress(self):
+        before = {'pixels': 120, 'columns': 12, 'state': 'text'}
+        self.assertTrue(GuiaChannel._ink_cleared({'pixels': 0, 'columns': 0,
+                                                 'state': 'empty'}, before))
+        self.assertTrue(GuiaChannel._ink_cleared({'pixels': 60, 'columns': 1,
+                                                  'state': 'caret_like'}, before))
+        # 光标帧墨迹没变少（且高于 CARET_INK_MAX=120）：caret_like 这条仍要靠
+        # 「确实比按键前少」拦住，不能被新的四成判据顺手放行。
+        wide = {'pixels': 400, 'columns': 12, 'state': 'text'}
+        same = {'pixels': 400, 'columns': 1, 'state': 'caret_like'}
+        self.assertFalse(GuiaChannel._ink_cleared(same, wide))
+
+    def test_driver_path_counts_a_quarter_drop_with_two_columns_as_cleared(self):
+        # 端到端：驱动 composer_cleared 说没清空，墨迹回读 900/4000 且只剩 2 列。
+        gui = CaretGui({'pixels': 900, 'columns': 2, 'state': 'text'})
+        gui._ink = {'pixels': 4000, 'columns': 40, 'state': 'text'}
+        channel = make_channel(gui)
+        seen, (p1, p2) = self.keys()
+        with p1, p2:
+            box = channel._empty_input_destination(gui, channel._clock() + 5)
+        self.assertEqual(box, (10, 20, 200, 100))
+        self.assertEqual(seen, [('ctrl', 0x41), ('key', 0x2E)])
+        self.assertTrue(channel._draft_cleared)
+
+    def keys(self):
+        seen = []
+        patches = (
+            patch('src.wechat_guia_send._paste_keys',
+                  side_effect=lambda user32, vk=0x56: seen.append(('ctrl', vk))),
+            patch('src.wechat_guia_send._tap_key',
+                  side_effect=lambda user32, vk: seen.append(('key', vk))),
+        )
+        return seen, patches
+
+
 if __name__ == '__main__':
     unittest.main()

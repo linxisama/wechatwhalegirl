@@ -1,3 +1,11 @@
+## 1.3.88 草稿清空误判、发送诊断落盘、DPI 探测修正、沙盒文案统一、DSH 人设依赖兼容
+
+- `src/wechat_guia_send.py:1237` `_ink_cleared` 与 `src/wechat_pixel_gui.py:468` `composer_cleared` 各加一条同形判据：不论 `draft_state` 返回什么，墨迹降到 `max(2, 40%)` 以内且只剩 `<=2` 个竖列就算已清空。真机 Delete 之后那一帧常被 `draft_state` 判成 `text`（光标层常驻 PrintWindow 位图），旧的两条判据都不成立，明明清空了还报「清空后仍有草稿」；清空失败文案改为「请手动点进输入框按 Ctrl+A 再 Delete 后重试」。`tests/test_auto_clear_draft1358.py` 新增 `DropCriterionTests` 5 例，钉住「只降 10%、还剩 8 列」必须继续拒绝。
+- 发送诊断落盘：`src/logging_setup.py:337` `SEND_EVENT_KEEP_DAYS=7`、`:419` `send_event_dir()`、`:424` `send_event_path()`、`:452` `append_send_event()` 把 phase/failed 记录写进 `logs/send-events-YYYY-MM-DD.jsonl`（按天滚动、自动清理 7 天前文件）；`src/send_history.py:194` `event_paths()` 从新到旧拼路径、`:242` `recent_events()` 逐文件反转后按 ts 升序返回。`/api/send/history` 的阶段与失败改读事件文件，耗时仍读后台日志尾部；`src/gui/send_panel.py` 的 hint 与空态文案同步改成「按天保存、保留 7 天」。
+- `src/site_profile.py:93` 新增 `_foreground_dpi()`，按真实归属分三级取 DPI：`user32.GetDpiForWindow` → `shcore.GetDpiForMonitor(MDT_EFFECTIVE_DPI)` → `GetDpiForSystem`。原来 `GetDpiForWindow` 去 `shcore` 里找，每次都抛 AttributeError 又被当成「老系统没有这个 API」，窗口 DPI 恒为 None，144 DPI 的机器被报成 100%/125%；`data` 同时带出 `dpi_source`/`system_dpi`/`window_dpi`，系统兜底一律报 warn。
+- `src/sandbox_manager.py:280` `find_wsb()` 改用 `src/site_profile.py:470` `_resolve_wsb_exe()`，`/api/sandbox/status` 与 `/api/sandbox/provision/status` 不再各说各话；找不到时的报错文案改为提示先看 provision 判定或跑「沙盒诊断.bat」。
+- `src/dsh_bridge.py` 的 `modern` 判据同时认 `dsh-agent-preset`（单数）与 `dsh-agent-presets`（复数），`src/gui/smoke.py` 按本机真实包名造依赖目录。仍为内部测试候选，不制作正式安装包。
+
 ## 1.3.87 隐藏窗口恢复、逐键前台守卫、14-17px 标题边界档
 
 - `src/wechat_guia_send.py` 新增 `_visible()`（`IsWindowVisible`，查询异常按可见兜底）；`_restore_minimized()` 成功条件改为「未最小化且可见」，隐藏窗口也用 `ShowWindow(..., SW_SHOWNOACTIVATE=4)` 恢复；`_restore_window_if_needed()` 与 `available()` 同时识别最小化/隐藏（reason 仍为 `minimized`，文案区分两者）；`_open_target_chat` 每次按 Esc 后检查窗口是否被按键弄成隐藏并立即恢复。

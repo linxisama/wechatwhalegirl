@@ -84,7 +84,7 @@ class SendPanelTests(unittest.TestCase):
         data['last_failure'] = None
         data['failure_codes'] = {}
         self.deliver(data)
-        self.assertIn('无（日志尾部没有失败记录）', self.panel.failure.text())
+        self.assertIn('无（最近 7 天的发送记录里没有失败）', self.panel.failure.text())
 
     def test_empty_items(self):
         self.panel.refresh()

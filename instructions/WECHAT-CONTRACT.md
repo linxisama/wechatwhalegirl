@@ -1,3 +1,11 @@
+## 1.3.88 草稿清空误判、发送诊断落盘、DPI 探测修正、沙盒文案统一、DSH 人设依赖兼容
+
+- 草稿清空契约扩充（不是放宽）：除「`state == 'empty'`」与「`state == 'caret_like'` 且墨迹确实变少」之外，新增「不论 `state`，墨迹降到 `max(2, 40%)` 以内且 `columns <= 2`」也算已清空。`src/wechat_guia_send.py:1237` `_ink_cleared` 与 `src/wechat_pixel_gui.py:468` `composer_cleared` 两处判据必须同形，任何一处单独放宽都会让「清空后仍有草稿」的守卫失去意义。
+- 发送记录契约：phase/failed 一律写 `logs/send-events-YYYY-MM-DD.jsonl`（保留 7 天），`/api/send/history` 只从事件文件读阶段与失败、从后台日志尾部读耗时；事件文件内行序是旧→新，读取方必须反转后再按 `ts` 升序输出，否则面板「最近 N 条」会冻结在当天最早的几次发送上。
+- 环境探测契约：DPI 只读，绝不调用任何设置进程 DPI 感知的 API；取值顺序固定为 `user32.GetDpiForWindow` → `shcore.GetDpiForMonitor(MDT_EFFECTIVE_DPI)` → `GetDpiForSystem`，降级到系统值时必须报 warn（系统缩放与微信窗口实际缩放可能不一致）。
+- 沙盒 CLI 解析契约：`wsb.exe` 只有一处解析器 `src/site_profile.py:470` `_resolve_wsb_exe()`（System32 → WindowsApps → PATH，只做 `is_file` 判定，不执行 PATH 里任意同名程序），`src/sandbox_manager.py:280` 必须复用它，不得自拼候选路径。
+- DSH 人设契约：`modern` 判据必须同时认 `dsh-agent-preset`（单数）与 `dsh-agent-presets`（复数）；只认一种会把另一种机器误判成老机制，去写新版 DSH 已经不读的 `~/.dsh/.agent-presets`，结果控制台显示已连接但 `stage=preset_missing`。
+
 ## 1.3.87 隐藏窗口恢复、逐键前台守卫、14-17px 标题边界档
 
 - 窗口恢复契约：`_visible()` 用 `IsWindowVisible` 判断可见性，查询异常按可见处理；`_restore_minimized()` 仅在「未最小化且可见」时返回成功，隐藏窗口用 `SW_SHOWNOACTIVATE(4)` 恢复且不抢前台；`available()` 对隐藏窗口仍报 `reason=minimized`，失败文案明确写「被隐藏」。

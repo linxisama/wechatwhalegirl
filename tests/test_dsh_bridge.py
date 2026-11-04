@@ -82,18 +82,39 @@ class ProtocolTests(unittest.TestCase):
             self.assertIn('tools.guard', GUARD)
             self.assertEqual((root/'app/data/dsh_bridge/no-tools.mjs').read_text('utf-8'), GUARD)
 
-    def test_legacy_directory_install_does_not_add_unsupported_profile_plugin(self):
+    def test_plural_dependency_directory_writes_profile_patch_not_legacy_folder(self):
+        # 依赖目录是复数形态的机器同样只认cordis.patch.yml里的声明行；误判成老机制会去写
+        # 新版DSH已经不读的~/.dsh/.agent-presets，人设永远装不上。
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             folder = root / 'home/profiles/desktop'
             (folder / 'node_modules/@deepseek-ai/dsh-agent-presets').mkdir(parents=True)
             patch = folder / 'cordis.patch.yml'; patch.write_text('[]\n', 'utf-8')
             installed = install_preset(root/'app', root/'home')
-            self.assertEqual(installed['format'], 'directory')
-            self.assertEqual(patch.read_text('utf-8'), '[]\n')
-            entries = yaml.safe_load(Path(installed['path']).read_text('utf-8'))
-            self.assertEqual([r['id'] for r in entries], ['persona','no-tools'])
-            self.assertTrue((root/'home/.agent-presets'/PRESET/'no-tools.mjs').is_file())
+            self.assertEqual(installed['format'], 'profile')
+            self.assertEqual(Path(installed['path']), patch)
+            self.assertIn('preset-whale-wechat-chat', patch.read_text('utf-8'))
+            self.assertFalse((root/'home/.agent-presets').exists())
+
+    def test_singular_dependency_directory_also_writes_profile_patch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            folder = root / 'home/profiles/desktop'
+            (folder / 'node_modules/@deepseek-ai/dsh-agent-preset').mkdir(parents=True)
+            patch = folder / 'cordis.patch.yml'; patch.write_text('[]\n', 'utf-8')
+            installed = install_preset(root/'app', root/'home')
+            self.assertEqual(installed['format'], 'profile')
+            self.assertIn('preset-whale-wechat-chat', patch.read_text('utf-8'))
+            self.assertFalse((root/'home/.agent-presets').exists())
+
+    def test_missing_both_dependency_directories_raises_and_modifies_nothing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / 'home/profiles/desktop').mkdir(parents=True)
+            with self.assertRaisesRegex(DshError, r'dsh-agent-preset\(s\)'):
+                install_preset(root/'app', root/'home')
+            self.assertFalse((root/'home/.agent-presets').exists())
+            self.assertFalse((root/'home/profiles/desktop/cordis.patch.yml').exists())
 
 
 class Socket:
