@@ -110,3 +110,88 @@ def supersedes(old_content: str, new_content: str) -> bool:
 def near_duplicate(left: str, right: str, threshold: float = 0.92) -> bool:
     """近重复判断（维护时合并用）。"""
     return SequenceMatcher(None, str(left), str(right)).ratio() >= threshold
+
+
+# 召回时的默认近重复阈值：比维护（0.92）松一点，因为召回要防的是"同一件事换个说法
+# 占掉两个名额"，而维护要防的是误合并两条不同事实。
+RECALL_DUP_THRESHOLD = 0.82
+
+
+def content_of(item) -> str:
+    """兼容 dict / sqlite Row / 纯字符串三种形态。"""
+    if isinstance(item, str):
+        return item
+    try:
+        return str(item["content"] or "")
+    except Exception:
+        try:
+            return str(item[3] or "")
+        except Exception:
+            return ""
+
+
+def field_of(item, name, index, default=0):
+    """按名字取值，取不到就按列号取；两种都失败返回默认值。"""
+    if isinstance(item, dict):
+        return item.get(name, default)
+    try:
+        return item[name]
+    except Exception:
+        try:
+            return item[index]
+        except Exception:
+            return default
+
+
+def dedupe(items, threshold: float = RECALL_DUP_THRESHOLD, key=None):
+    """去掉近重复条目，保留**先出现的**那条。
+
+    调用方先按相关度排好序，所以"先出现"就是"更该被召回"的那条。为什么必须去重：
+    用户同一句话往往被反复记成多条（原话、加标点、加主语），全都进上下文既贵又
+    把新信息挤掉——这就是"同一句话反复被召回"的真实成因。
+    返回 (保留列表, 去掉的条数)。
+    """
+    kept, dropped = [], 0
+    seen_text = []
+    for item in items or ():
+        text = key(item) if callable(key) else content_of(item)
+        text = str(text or "")
+        if any(near_duplicate(text, other, threshold) for other in seen_text):
+            dropped += 1
+            continue
+        seen_text.append(text)
+        kept.append(item)
+    return kept, dropped
+
+
+def rank(items, query: str, now: float, limit: int = 5, half_life_days: float = 14.0,
+         min_score: float = 0.10, dup_threshold: float = RECALL_DUP_THRESHOLD):
+    """按 score 排序 + 去重 + 截断，返回 (结果列表, 统计)。
+
+    统计里 kept/dropped/duplicates 是给日志用的：召回到底压掉了多少重复、
+    有多少条因为相关度不足被丢弃，用户第一次能看见。
+    """
+    scored = []
+    for item in items or ():
+        text = content_of(item)
+        if not text:
+            continue
+        updated = field_of(item, "updated", 7, 0)
+        hits = field_of(item, "hits", 5, 0)
+        try:
+            value = score(query, text, float(updated or 0), hits, now, half_life_days)
+        except (TypeError, ValueError):
+            value = 0.0
+        scored.append((value, item))
+    # 稳定排序：同分时保持调用方给的顺序（通常是 updated DESC），行为可预测
+    scored.sort(key=lambda pair: pair[0], reverse=True)
+    threshold = float(min_score or 0)
+    filtered = [item for value, item in scored if not query or value >= threshold]
+    kept, dropped = dedupe(filtered, dup_threshold)
+    try:
+        cap = max(1, int(limit))
+    except (TypeError, ValueError):
+        cap = 5
+    return kept[:cap], {"scored": len(scored), "kept": min(cap, len(kept)),
+                        "duplicates": dropped,
+                        "below_threshold": len(scored) - len(filtered)}

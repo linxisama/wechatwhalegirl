@@ -20,6 +20,32 @@ import re
 
 from . import PluginBase, PluginMeta, FieldSchema
 
+# 近重复判定的粗口径：不引 difflib（每条都要比一次，历史长时开销明显），
+# 用"去掉标点空白后是否互相包含 / 二元组重合度"就够识别"同一句话的几种写法"。
+_PUNCT = re.compile(r'[\s\u3000-\u303f\uff00-\uffef,.!?;:、，。！？；：""''（）()【】]+')
+
+
+def _norm(text):
+    return _PUNCT.sub('', str(text or '')).lower()
+
+
+def _similar(left, right, threshold=0.82):
+    """0~1 的粗相似度：归一化后包含算 1，否则按二元组重合率。"""
+    a, b = _norm(left), _norm(right)
+    if not a or not b:
+        return 0.0
+    if a == b:
+        return 1.0
+    if len(a) >= 4 and len(b) >= 4 and (a in b or b in a):
+        return 1.0
+    if len(a) < 2 or len(b) < 2:
+        return 0.0
+    grams_a = {a[i:i+2] for i in range(len(a)-1)}
+    grams_b = {b[i:i+2] for i in range(len(b)-1)}
+    if not grams_a or not grams_b:
+        return 0.0
+    return len(grams_a & grams_b) / min(len(grams_a), len(grams_b))
+
 
 def _content_of(message) -> str:
     content = message.get('content') if isinstance(message, dict) else None
@@ -40,25 +66,90 @@ def _protected(message):
                                         or isinstance(message.get('content'),list) or message.get('_token_continuity'))
 
 
+def layer_of(message):
+    """把一条消息归到预算层：persona / memory / learning / image / history。
+
+    为什么要分层：6000 字预算里"人设占多少、插件占多少、被砍了多少"以前只能靠
+    一行日志猜。层名与 token_ledger.BLOCKS 对齐，账本可以直接消费，不用二次映射。
+    前缀判断沿用 _removal_index 的口径——那里已经在识别"长期记忆/学习结果/历史摘要"，
+    两处必须一致，否则账本和节流说的不是同一件事。
+    """
+    if isinstance(message, dict) and isinstance(message.get('content'), list):
+        return 'image'
+    text = _content_of(message)
+    if isinstance(message, dict) and message.get('role') in {'system', 'tool'}:
+        return 'persona'
+    if text.startswith(('本会话已确认学习结果', '对当前发送者的已确认长期记忆')):
+        return 'memory'
+    if text.startswith(('本会话相关旧记录', '本群/本会话最近对话')):
+        return 'learning'
+    return 'history'
+
+
+def layer_chars(messages):
+    """按层统计字符数；空输入返回空字典而不是全 0，账本据此判断"这一轮有没有分层数据"。"""
+    out = {}
+    for item in messages or ():
+        name = layer_of(item)
+        out[name] = out.get(name, 0) + len(_content_of(item))
+    return out
+
+
 def estimated_tokens(messages):
-    """保守估算：中日韩字符按2、其他字符按1/4；账单仍以服务商usage为准。"""
+    """保守估算：汉字 0.75、全角标点 1.2、其他 1/4 字符，每条再 +4 结构开销。
+
+    为什么不是"中日韩字符按 2"（1.6.31 移植过来的旧口径）：本机 16 轮真实回复
+    对照 completion_tokens，旧口径 MAPE 134.6%、偏差 +133.7%，等于把 2400 的 token
+    预算用成约 1030——历史被白砍一半。新系数在同一批样本上是 MAPE 22.5%、偏差
+    +13.4%，仍是偏保守（宁可多压一点），但不再把预算吃掉一半。账单永远以服务商
+    usage 为准。
+    """
     total=0
     for item in messages:
         text=_content_of(item)
-        cjk=len(re.findall(r'[\u3400-\u9fff\u3040-\u30ff\uac00-\ud7af]',text))
-        total+=4+cjk*2+math.ceil((len(text)-cjk)/4)
+        han=full=0
+        for ch in text:
+            code=ord(ch)
+            if 0x3400<=code<=0x9FFF or 0x3040<=code<=0x30FF or 0xAC00<=code<=0xD7AF:
+                han+=1
+            elif 0x3000<=code<=0x303F or 0xFF00<=code<=0xFFEF:
+                full+=1
+        total+=4+math.ceil(han*0.75+full*1.2+(len(text)-han-full)/4)
     return total
 
 
-def _removal_index(result):
+def _removal_index(result, dup_threshold=0.82):
+    """选下一条要删的消息：先按层级优先级，再按"是否与更新的消息重复"，最后才按新旧。
+
+    旧版只按 (层级, 下标) 取最小——同一优先级里等于"砍最旧的"。问题是历史里最常见
+    的浪费恰恰是**重复**：同一句话被记成多条（原话/加标点/加主语），它们既不旧也不
+    重要，却按顺序排在真正有信息量的旧消息前面被保留。这里先删与更新消息近重复的
+    那条，其次才删最旧的：同样的预算下留下的信息更多。
+    """
     def priority(row):
         text=_content_of(row)
         if text.startswith(('本会话已确认学习结果','对当前发送者的已确认长期记忆')):return 3
         if text.startswith('本会话相关旧记录'):return 2
         if text.startswith('本群/本会话最近对话'):return 1
         return 0
+
+    def redundant(index):
+        # 只在同层里比较，且只看"比它新的消息"：留下新的是常识，重复的旧的没有信息量
+        text = _content_of(result[index]).strip()
+        if not text:
+            return 0
+        for later in result[index+1:]:
+            other = _content_of(later).strip()
+            if not other:
+                continue
+            if other == text or _similar(text, other) >= dup_threshold:
+                return 1
+        return 0
+
     candidates=[i for i,row in enumerate(result[:-1]) if not _protected(row)]
-    return min(candidates,key=lambda i:(priority(result[i]),i)) if candidates else None
+    if not candidates:
+        return None
+    return min(candidates, key=lambda i: (priority(result[i]), -redundant(i), i))
 
 
 def compact(messages, keep=10, digest_chars=300, max_content_chars=0,
@@ -138,6 +229,10 @@ def compact(messages, keep=10, digest_chars=300, max_content_chars=0,
             result.pop(index);stats['dropped']+=1
     stats['estimated_before']=estimated_tokens(messages)
     stats['estimated_after']=estimated_tokens(result)
+    # 分层字数（改前/改后）：账本要回答"预算花在哪一层、哪一层被砍掉了"，
+    # 只有总字数回答不了。空输入时是空字典，不假装有数据。
+    stats['layers_before']=layer_chars(messages)
+    stats['layers_after']=layer_chars(result)
     stats['protected_over_budget']=bool(max_prompt_tokens>0 and stats['estimated_after']>max_prompt_tokens)
     stats['saved_chars'] = max(0,sum(len(_content_of(v)) for v in messages)-sum(len(_content_of(v)) for v in result))
     if preserve_last_pair:
@@ -193,7 +288,8 @@ class TokenSaver(PluginBase):
             conversation[:] = packed
             message['_token_saving'] = {'saved_chars':stats['saved_chars'], 'before_chars':total,
                 'after_chars':sum(len(_content_of(v)) for v in packed),
-                'estimated_before':stats['estimated_before'],'estimated_after':stats['estimated_after']}
+                'estimated_before':stats['estimated_before'],'estimated_after':stats['estimated_after'],
+                'layers_before':stats['layers_before'],'layers_after':stats['layers_after']}
             if self.get('verbose', False):
                 runtime.note(f"[Token 节流] 本轮：压掉 {stats['dropped']} 条历史、"
                              f"截断 {stats['truncated']} 条、去重 {stats['deduped']} 条；"

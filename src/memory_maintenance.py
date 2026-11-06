@@ -1,34 +1,114 @@
-"""记忆维护与预算（1.3.0 P1-3 收尾）。
+"""记忆维护与预算（1.3.0 P1-3 收尾；1.3.92 加去重/配置/淘汰）。
 
-两件事：
+四件事：
 1. **预算**：手动记忆按相关度最多 8 条 / 1800 字，别把上百条全塞进提示词（既贵又乱）。
-2. **整理**：合并近重复、清理过期 superseded、清理长期单证据候选。数据只标记不硬删，
+2. **去重**：同一句话常被记成多条（原话、加标点、加主语），预算里必须先去重再截断，
+   否则一条记忆占掉两个名额，把新信息挤出去。
+3. **整理**：合并近重复、清理过期 superseded、清理长期单证据候选。数据只标记不硬删，
    用户还能在「整理记忆」的结果里看到动了什么。
+4. **淘汰**：容量上限从模块常量改成可配置；淘汰按"相关度 + 新鲜度 + 命中"算分，
+   而不是按 updated 的 FIFO——老但常被复证的事实不该先死。
+
+所有数值都是"字"不是 token；估算口径见 token_ledger.estimate_tokens。
 """
 from __future__ import annotations
 
 import time
 
-from .memory_rank import near_duplicate
+from .memory_rank import content_of, near_duplicate
 
 MAX_ITEMS = 8
 MAX_CHARS = 1800
 SUPERSEDED_TTL = 7 * 86400
 CANDIDATE_TTL = 30 * 86400
+# 容量上限（条）：超过就淘汰得分最低的。旧版把它写死在 chat_state.remember() 的
+# LIMIT max(10,min(5000,maximum)) 里，调用方无法按人格/场景收紧，这里给一份默认值。
+MAX_TOTAL_ITEMS = 3000
+# 淘汰保护：最近这么多秒内动过的记忆一律不动，避免刚记住就被自己的淘汰规则清掉
+EVICT_GRACE = 3600.0
+# 淘汰打分权重：命中次数占大头（复证＝真实价值），其次相关度/新鲜度
+EVICT_W_HITS = 0.5
+EVICT_W_FRESH = 0.3
+EVICT_W_SELF = 0.2
 
 
-def budget(items, max_items: int = MAX_ITEMS, max_chars: int = MAX_CHARS) -> list:
-    """按给定顺序（调用方已按相关度排好）截断到条目数与字数上限。"""
+def budget(items, max_items: int = MAX_ITEMS, max_chars: int = MAX_CHARS,
+           dedupe: bool = True, threshold: float = 0.82) -> list:
+    """先按近重复去重，再按给定顺序截断到条目数与字数上限。
+
+    调用方已经按相关度排好序；这里只做"同一件事只留一条 + 砍到预算内"。
+    首条永远保留：单条超长时也要给调用方一条可用记忆，否则预算就把记忆清零了。
+    """
     out, used = [], 0
-    for item in items:
+    seen = []
+    for item in items or ():
         if len(out) >= max(1, int(max_items)):
             break
-        text = str(item.get("content") or item.get("text") or "")
+        text = str(item.get("content") or item.get("text") or "") if isinstance(item, dict) \
+            else content_of(item)
+        if dedupe and text:
+            if any(near_duplicate(text, other, threshold) for other in seen):
+                continue
+            seen.append(text)
         if used + len(text) > max_chars and out:
             break
         out.append(item)
         used += len(text)
     return out
+
+
+def evict_score(row, now: float) -> float:
+    """淘汰打分：命中越多、越新、内容越具体（越长）越该留。分数低者先淘汰。"""
+    hits = float(row[5] or 0)
+    updated = float(row[6] or 0)
+    text = str(row[3] or "")
+    age_days = max(0.0, (now - updated) / 86400.0) if updated else 365.0
+    fresh = 0.5 ** (age_days / 14.0)
+    # 命中次数归一：5 次封顶，和 memory_rank.evidence_score 同口径
+    evidence = min(1.0, max(0.0, hits) / 5.0)
+    detail = min(1.0, len(text) / 40.0)
+    return EVICT_W_HITS * evidence + EVICT_W_FRESH * fresh + EVICT_W_SELF * detail
+
+
+def evict(db, maximum: int = MAX_TOTAL_ITEMS, now: float | None = None,
+          grace: float = EVICT_GRACE) -> int:
+    """超出容量上限时淘汰得分最低的记忆，返回淘汰条数。
+
+    为什么不是 FIFO：按 updated 排序删最旧的，会优先删掉"很久没提但被复证过"的
+    稳定事实（口味、住址），而这些恰恰是最该长期保留的；反而留下刚被误记的一条。
+    淘汰只动 confirmed/candidate 里得分最低的，superseded 交给 maintain 的 TTL 清。
+    """
+    now = time.time() if now is None else now
+    try:
+        cap = max(1, int(maximum))
+    except (TypeError, ValueError):
+        cap = MAX_TOTAL_ITEMS
+    try:
+        rows = db.execute(
+            "SELECT id,scope,subject,content,status,hits,updated FROM chat_memories").fetchall()
+    except Exception:
+        return 0
+    if len(rows) <= cap:
+        return 0
+    removable = [row for row in rows
+                 if str(row[4] or '') != 'superseded'
+                 and (not row[6] or now - float(row[6]) >= grace)]
+    excess = len(rows) - cap
+    if not removable or excess <= 0:
+        return 0
+    removable.sort(key=lambda row: (evict_score(row, now), float(row[6] or 0)))
+    removed = 0
+    for row in removable[:excess]:
+        try:
+            db.execute("DELETE FROM chat_memories WHERE id=?", (row[0],))
+            removed += 1
+        except Exception:
+            continue
+    try:
+        db.commit()
+    except Exception:
+        pass
+    return removed
 
 
 def maintain(db, now: float | None = None) -> dict:
@@ -77,4 +157,8 @@ def maintain(db, now: float | None = None) -> dict:
         db.commit()
     except Exception:
         pass
-    return {"merged": merged, "expired": expired, "dropped": dropped}
+    # 整理完顺手按容量上限淘汰一次：maintain 是"用户点整理"的入口，淘汰放这里
+    # 而不是每条消息都算，避免在最热的写入路径上做全表打分。
+    evicted = evict(db, now=now)
+    return {"merged": merged, "expired": expired, "dropped": dropped,
+            "evicted": evicted}

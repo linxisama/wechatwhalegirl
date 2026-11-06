@@ -22,6 +22,46 @@ DUP_THRESHOLD = 0.95
 DIARY_MIN_CHARS = 40
 MIN_CHARS = 6
 
+# 阈值可配置（1.3.92）：旧版把去重阈值/模糊下限写死，不同人设的记忆风格差很远——
+# 话痨人设的"好的/嗯嗯"很多，短句下限该松；记录型人设反而要严。上限/下限是护栏，
+# 防止把 0.95 配成 0.3 之后所有记忆都被判重复。
+LIMIT_BOUNDS = {
+    'dupThreshold': (0.60, 0.999),
+    'minChars': (2, 40),
+    'diaryMinChars': (20, 400),
+}
+
+
+def _bounded(raw, low, high):
+    """只接受真正的数值且落在护栏内；其余（None/字符串/越界）一律退回默认。"""
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        return None
+    value = float(raw)
+    if value != value or value < low or value > high:   # NaN 也在这里被挡掉
+        return None
+    return value
+
+
+def limits(config=None):
+    """读 memory_guard.limits.* 配置；任何非法值都退回模块默认，绝不抛。"""
+    cfg = config if isinstance(config, dict) else {}
+    nested = cfg.get('limits')
+    nested = nested if isinstance(nested, dict) else {}
+
+    def pick(name, default, as_int=False):
+        raw = nested.get(name, cfg.get(name))
+        low, high = LIMIT_BOUNDS[name]
+        value = _bounded(raw, low, high)
+        if value is None:
+            return default
+        return int(value) if as_int else value
+
+    return {
+        'dupThreshold': pick('dupThreshold', DUP_THRESHOLD),
+        'minChars': pick('minChars', MIN_CHARS, as_int=True),
+        'diaryMinChars': pick('diaryMinChars', DIARY_MIN_CHARS, as_int=True),
+    }
+
 _SECRET = re.compile(
     r'(密码|口令|密钥|私钥|api[ _-]?key|apikey|access[ _-]?token|secret|sk-[A-Za-z0-9_-]{8,}'
     r'|BEGIN [A-Z ]*PRIVATE KEY|身份证号?|银行卡号?|信用卡|验证码|支付密码)', re.I)
@@ -74,9 +114,14 @@ def _existing_pairs(existing):
 
 
 def inspect(text, existing=(), config=None):
-    """判定一条待写入记忆；返回纯数据，绝不改库、绝不抛异常。"""
+    """判定一条待写入记忆；返回纯数据，绝不改库、绝不抛异常。
+
+    阈值从 config 读（见 limits()），非法值退回默认——记忆是长期资产，配置写错
+    不应该让守卫静默失效，也不应该让它把一切都判成重复。
+    """
     cfg = config if isinstance(config, dict) else {}
     mode = str(cfg.get('mode') or 'report').lower()
+    caps = limits(cfg)
     value = str(text or '').strip()
     result = {'verdict': 'ok', 'codes': [], 'issues': [], 'mode': mode,
               'similarity': 0.0, 'duplicate_of': '', 'keyword_count': 0,
@@ -91,7 +136,7 @@ def inspect(text, existing=(), config=None):
     if _RELATIVE.search(value):
         codes.append('RELATIVE_TIME')
         issues.append({'code': 'RELATIVE_TIME', 'detail': '含"今天/上周"这类相对时间，放久了会失真'})
-    if len(value) >= DIARY_MIN_CHARS and value.startswith('我') and _DIARY.search(value):
+    if len(value) >= caps['diaryMinChars'] and value.startswith('我') and _DIARY.search(value):
         codes.append('DIARY_SMELL')
         issues.append({'code': 'DIARY_SMELL', 'detail': '像日记/心情摘抄，通常不该当长期事实'})
 
@@ -101,14 +146,14 @@ def inspect(text, existing=(), config=None):
         if score > best:
             best, best_id = score, ident
     result['similarity'] = round(best, 4)
-    if best >= DUP_THRESHOLD:
+    if best >= caps['dupThreshold']:
         codes.append('DUP')
         result['duplicate_of'] = best_id
         issues.append({'code': 'DUP', 'detail': '与已有记忆过于相似'})
 
     count = len(keywords(value))
     result['keyword_count'] = count
-    if len(value) < MIN_CHARS:
+    if len(value) < caps['minChars']:
         codes.append('TOO_VAGUE')
         issues.append({'code': 'TOO_VAGUE', 'detail': '关键词太少，太模糊'})
 
