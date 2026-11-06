@@ -28,6 +28,22 @@ def rows_for(ink, scale, *boxes):
             for text, left, top, right, bottom in boxes]
 
 
+def scripted(provider, rows):
+    """前几份候选按给定词框作答，其余候选一律 0 行。
+
+    1.3.89 起候选表是 profile 族 + 48 组基础网格，"只给前几份词框"必须显式补空，
+    否则 Mock 的 side_effect 用完会抛 StopIteration 而不是模拟"这一份没读全"。
+    """
+    calls = []
+
+    def recognize(image):
+        index = len(calls)
+        calls.append(image)
+        return rows[index] if index < len(rows) else []
+
+    provider.recognize.side_effect = recognize
+
+
 def draw_glyphs(frame, left, top, count, pitch=14, size=12, height=26):
     # 1.3.87 起 14-17px 走边界档，旧表用例改用 26px 墨迹（仍是 25px 以上的旧表区间）。
     draw = ImageDraw.Draw(frame)
@@ -73,10 +89,15 @@ class TitlePassTests(unittest.TestCase):
             draw_glyphs(frame, 330, 20, 5)
             ink = _title_ink_region(frame, BAND)
             # 五个字都有墨迹，但只认出前四个：漏掉的字就落在识别框右边的空白里。
-            provider.recognize.side_effect = [rows_for(ink, scale, ('鲸鱼娘二', 330, 20, 384, 34))
-                                             for scale, _ in _TITLE_PASSES]
-            self.assertEqual(self.make_gui(frame, provider).current_chat_title(), '')
-        provider.recognize.assert_called_once()
+            scripted(provider, [rows_for(ink, scale, ('鲸鱼娘二', 330, 20, 384, 34))
+                                for scale, _ in _TITLE_PASSES])
+            gui = self.make_gui(frame, provider)
+            self.assertEqual(gui.current_chat_title(), '')
+            # 不完整的读数不投票，也不返回未达标的标题；一次完整读数都没有即 ocr_empty。
+            evidence = gui.title_diagnostic()
+            self.assertEqual(evidence['state'], 'ocr_empty')
+            self.assertFalse(any(row['complete'] for row in evidence['passes']))
+        self.assertGreaterEqual(provider.recognize.call_count, len(_TITLE_PASSES))
 
     def test_icons_right_of_the_band_do_not_reject_a_complete_title(self):
         provider = Mock()
@@ -87,8 +108,9 @@ class TitlePassTests(unittest.TestCase):
             for x in (700, 720, 740, 760):
                 draw.rectangle((x, 20, x + 9, 33), fill='black')
             ink = _title_ink_region(frame, BAND)
-            provider.recognize.side_effect = [rows_for(ink, scale, ('鲸鱼娘二号', 330, 20, 398, 34))
-                                             for scale, _ in _TITLE_PASSES]
+            # 1.3.90 去早停后候选表必然跑满，脚本答案用完后一律当作"这一份没读全"。
+            scripted(provider, [rows_for(ink, scale, ('鲸鱼娘二号', 330, 20, 398, 34))
+                                for scale, _ in _TITLE_PASSES])
             self.assertEqual(self.make_gui(frame, provider).current_chat_title(), '鲸鱼娘二号')
 
     def test_disagreeing_passes_return_empty(self):
@@ -97,10 +119,12 @@ class TitlePassTests(unittest.TestCase):
             draw_glyphs(frame, 330, 20, 5)
             ink = _title_ink_region(frame, BAND)
             texts = ['鲸鱼娘二号', '鲸鱼娘三号', '鲸鱼娘二号']
-            provider.recognize.side_effect = [
-                rows_for(ink, scale, (text, 330, 20, 398, 34))
-                for (scale, _), text in zip(_TITLE_PASSES, texts)]
-            self.assertEqual(self.make_gui(frame, provider).current_chat_title(), '')
+            scripted(provider, [rows_for(ink, scale, (text, 330, 20, 398, 34))
+                                for (scale, _), text in zip(_TITLE_PASSES, texts)])
+            gui = self.make_gui(frame, provider)
+            self.assertEqual(gui.current_chat_title(), '')
+            # 2 票对 1 票不达标（3 票且领先 2 票才算），出现两个不同完整读数即 disagreement。
+            self.assertEqual(gui.title_diagnostic()['state'], 'disagreement')
 
     def test_same_length_wrong_glyph_that_passes_completeness_is_rejected(self):
         # 真机实测过的最短复现：三个变体都读满整行、完整性都是 True，但 4 倍把「助」读成「曲」。
@@ -110,11 +134,13 @@ class TitlePassTests(unittest.TestCase):
             draw_glyphs(frame, 330, 20, 6)
             ink = _title_ink_region(frame, BAND)
             texts = ['文件传输助手', '文件传输曲手', '文件传输助手']
-            provider.recognize.side_effect = [
-                rows_for(ink, scale, (text, 330, 20, 412, 34))
-                for (scale, _), text in zip(_TITLE_PASSES, texts)]
-            self.assertEqual(self.make_gui(frame, provider).current_chat_title(), '')
-        self.assertEqual(provider.recognize.call_count, len(_TITLE_PASSES))
+            scripted(provider, [rows_for(ink, scale, (text, 330, 20, 412, 34))
+                                for (scale, _), text in zip(_TITLE_PASSES, texts)])
+            gui = self.make_gui(frame, provider)
+            self.assertEqual(gui.current_chat_title(), '')
+            self.assertEqual(gui.title_diagnostic()['state'], 'disagreement')
+        # 2 票对 1 票不达标，所以候选表要跑满：错字不能靠"另一份也错"凑过门槛。
+        self.assertGreater(provider.recognize.call_count, len(_TITLE_PASSES))
 
     def test_full_coverage_and_agreeing_passes_return_the_joined_name(self):
         provider = Mock()
@@ -122,9 +148,9 @@ class TitlePassTests(unittest.TestCase):
             draw_glyphs(frame, 330, 20, 2)
             draw_glyphs(frame, 362, 20, 2)
             ink = _title_ink_region(frame, BAND)
-            provider.recognize.side_effect = [
+            scripted(provider, [
                 rows_for(ink, scale, ('鲸鱼', 330, 20, 356, 34), ('二号', 362, 20, 388, 34))
-                for scale, _ in _TITLE_PASSES]
+                for scale, _ in _TITLE_PASSES])
             self.assertEqual(self.make_gui(frame, provider).current_chat_title(), '鲸鱼 二号')
 
     def test_uncovered_ink_left_of_the_box_returns_empty(self):
@@ -133,20 +159,26 @@ class TitlePassTests(unittest.TestCase):
             draw_glyphs(frame, 320, 20, 1)
             draw_glyphs(frame, 345, 20, 2)
             ink = _title_ink_region(frame, BAND)
-            provider.recognize.side_effect = [rows_for(ink, scale, ('二号', 345, 20, 371, 34))
-                                             for scale, _ in _TITLE_PASSES]
-            self.assertEqual(self.make_gui(frame, provider).current_chat_title(), '')
-        provider.recognize.assert_called_once()
+            scripted(provider, [rows_for(ink, scale, ('二号', 345, 20, 371, 34))
+                                for scale, _ in _TITLE_PASSES])
+            gui = self.make_gui(frame, provider)
+            self.assertEqual(gui.current_chat_title(), '')
+            # 框左边还有没被覆盖的墨迹：这一份读数作废，一次完整读数都没有即 ocr_empty。
+            self.assertEqual(gui.title_diagnostic()['state'], 'ocr_empty')
+        self.assertGreaterEqual(provider.recognize.call_count, len(_TITLE_PASSES))
 
     def test_box_touching_the_band_edge_cannot_confirm_the_line_ends(self):
         provider = Mock()
         with fixture_frame() as frame:
             draw_glyphs(frame, 640, 20, 1)
             ink = _title_ink_region(frame, BAND)
-            provider.recognize.side_effect = [rows_for(ink, scale, ('一号', 630, 20, 658, 34))
-                                             for scale, _ in _TITLE_PASSES]
-            self.assertEqual(self.make_gui(frame, provider).current_chat_title(), '')
-        provider.recognize.assert_called_once()
+            scripted(provider, [rows_for(ink, scale, ('一号', 630, 20, 658, 34))
+                                for scale, _ in _TITLE_PASSES])
+            gui = self.make_gui(frame, provider)
+            self.assertEqual(gui.current_chat_title(), '')
+            # 词框顶到标题区右边界，无法确认整行已读完：同样不采信。
+            self.assertEqual(gui.title_diagnostic()['state'], 'ocr_empty')
+        self.assertGreaterEqual(provider.recognize.call_count, len(_TITLE_PASSES))
 
 
 if __name__ == '__main__':

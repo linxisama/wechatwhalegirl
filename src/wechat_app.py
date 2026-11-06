@@ -245,6 +245,14 @@ def send_channel_hint(environment, compat=False):
         return reason + '｜处理：发送前会自动恢复显示（只显示、不抢前台），不用手动恢复；若一直显示，点「测试发送」复检'
     if code in ('chat_not_open', 'input_unavailable'):
         return reason + '｜处理：先在微信里手动点开目标会话（程序不会替你切会话）'
+    if code == 'desktop_unavailable':
+        return reason + '｜处理：解锁桌面（或接回远程桌面会话）后再重试'
+    if code == 'account_unverified':
+        return reason + '｜处理：只保留一个微信窗口，确认登录的是本程序绑定的账号，再点「测试微信」复查'
+    if code in ('window_changed', 'window_query_failed'):
+        return reason + '｜处理：只保留一个微信窗口并手动点开目标会话，再点「测试微信」复查'
+    if code == 'unsupported_submit':
+        return reason + '｜处理：设置 → 发送通道改回默认（严格后台或兼容模式）后重新启动机器人'
     if code == 'target_not_open':
         return reason + '｜处理：先在微信里手动点开目标会话（程序不会替你切会话）'
     if code == 'guia_unavailable':

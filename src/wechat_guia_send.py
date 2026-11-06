@@ -24,6 +24,7 @@ from __future__ import annotations
 import ctypes
 import os
 import queue
+import re
 import threading
 import time
 import uuid
@@ -633,6 +634,23 @@ def _send_input_click(user32, x, y, sleep=None, before_press=None):
         nap(0.06)
 
 
+# 微信群标题栏末尾的成员数后缀：「群名（77）」。全角/半角括号各认一对，不认混搭。
+_MEMBER_SUFFIX = re.compile(r'(?:（\d+）|\(\d+\))$')
+
+
+def _strip_member_suffix(text):
+    """剥掉群标题结尾的成员数后缀；没有该后缀时原样返回（同一个对象）。
+
+    为什么只认这一种形态：微信群标题栏固定是「群名（成员数）」，1:1 会话没有后缀。
+    只剥"结尾一对括号 + 纯数字"，不做前缀/子串/相似度匹配——否则
+    「极客先锋社招新群（77）」会匹配上更短的「极客先锋社招新」，那是会发错人的假阳性。
+    """
+    if not isinstance(text, str):
+        return text
+    match = _MEMBER_SUFFIX.search(text)
+    return text[:match.start()] if match else text
+
+
 class _GuardFailed(Exception):
     def __init__(self, code, detail=''):
         self.code, self.detail = code, detail
@@ -805,7 +823,7 @@ class GuiaChannel:
                 diagnostic = getattr(gui, 'title_diagnostic', None)
                 evidence = diagnostic() if callable(diagnostic) else None
                 states = ('not_read', 'verified', 'ocr_error', 'ocr_empty', 'incomplete', 'disagreement',
-                          'capture_or_layout_error', 'header_missing')
+                          'capture_or_layout_error', 'header_missing', 'ocr_budget')
                 if isinstance(evidence, dict) and evidence.get('state') in states:
                     self._title_evidence = evidence
                     return title if evidence['state'] == 'verified' else ''
@@ -860,9 +878,12 @@ class GuiaChannel:
         # 不复制标题、异常正文或未知适配器字段。
         value = getattr(self, '_title_evidence', {})
         states = ('not_read', 'verified', 'ocr_error', 'ocr_empty', 'incomplete', 'disagreement',
-                  'capture_or_layout_error', 'header_missing')
+                  'capture_or_layout_error', 'header_missing', 'ocr_budget')
         result = {'state': value.get('state') if value.get('state') in states else 'ocr_empty'}
-        if value.get('profile') in ('medium', 'legacy'):
+        # profile 只是"这一帧用了哪张变体表"的说明性字段，不是安全判定依据；像素层现在
+        # 会产出 boundary / small / medium_fallback / medium_binarized 等新档，按档名白名单
+        # 过滤只会让真机现场丢掉定位线索，所以原样透传任意字符串档名。
+        if isinstance(value.get('profile'), str):
             result['profile'] = value['profile']
         if type(value.get('glyph_height')) is int and 0 <= value['glyph_height'] <= 4096:
             result['glyph_height'] = value['glyph_height']
@@ -880,12 +901,16 @@ class GuiaChannel:
 
     @staticmethod
     def title_matches(title: str, who: str) -> bool:
-        """OCR 只允许完整标题相等；截断或包含关系不能证明收件人身份。"""
+        """OCR 只允许完整标题相等；群标题末尾的成员数后缀剥掉后再逐字比一次。
+
+        截断或包含关系仍不能证明收件人身份：剥后缀后必须与目标名完全相等，
+        「极客先锋社招新群（77）」对「极客先锋社招新」依旧 False。
+        """
         title = str(title or '').strip()
         who = str(who or '').strip()
         if not title or not who:
             return False            # 读不到就当对不上：宁可失败也不发错人
-        return title == who
+        return title == who or _strip_member_suffix(title) == who
 
     # ---------------------------------------------------------------
     # 标题核验：一次全族 OCR + 标题条像素签名复用

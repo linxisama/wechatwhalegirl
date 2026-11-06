@@ -81,6 +81,21 @@ _BOUNDARY_TITLE_PASSES = ((2, 160, 8, 'nearest'), (2, None, 8, 'smooth'),
                           (2.5, 150, 8, 'nearest'))
 
 
+# 48 变体基础网格：真机上不同窗口尺寸的标题条像素落在不同变体表里，单帧内能读全的
+# 变体很少且互不相同，"族内三份逐字一致"于是永远凑不齐（同一台机器 1918x1088 帧墨迹高
+# 18 走 medium 档、最大化 1920x1079 帧墨迹高 12 走 small 档，两档各自族内都凑不齐，
+# 发送于是恒 title_unverified → 不发）。四张真实帧（本机 full 帧、本机 a 帧、
+# filehelper 18px 夹具、415 标题条夹具）上这张网格全部收敛到正确标题；砍掉 1.5/1.75
+# （32 组）或减到 24/12 组时"a 帧"一票都投不出来，所以三档倍率全留。超宽网格（400 组）
+# 四帧全对但耗时 9.22-12.57s，超过 TITLE_READ_BUDGET 已否决，不要再放大网格。
+# 顺序：scale 外层、threshold、padding、resample 内层。
+_TITLE_BASE_GRID = tuple((scale, threshold, padding, resample)
+                         for scale in (1.5, 1.75, 2.0, 2.5, 3.0, 4.0)
+                         for threshold in (None, 150)
+                         for padding in (0, 8)
+                         for resample in ('smooth', 'nearest'))
+
+
 def _pass_variants(passes):
     """旧式表没有重采样字段：缺省与历史一致，仍是像素忠实放大 + 硬阈值。"""
     return tuple(entry if len(entry) == 4 else (*entry, 'nearest') for entry in passes)
@@ -100,6 +115,24 @@ def _title_pass_families(passes):
         return (('boundary', _pass_variants(_BOUNDARY_TITLE_PASSES)),
                 ('legacy', _pass_variants(tuple((s, t, 0) for s, t in _TITLE_PASSES))))
     return (('legacy', _pass_variants(passes)),)
+
+
+def _title_candidates(passes):
+    """本次读取要依次尝试的候选：实测 profile 族在前，48 组基础网格兜底，去重保序。
+
+    profile 表是按帧实测出来的优证据，先跑能在多数帧上几百毫秒内收敛；基础网格兜住
+    "profile 表凑不齐"的那些帧。全程不接收、不比较期望会话名，所以网格不是因为"更接近
+    目标"而胜出，只是前面那些候选没投票出来。
+    """
+    candidates = []
+    for _family, variants in _title_pass_families(passes):
+        for variant in variants:
+            if variant not in candidates:
+                candidates.append(variant)
+    for variant in _TITLE_BASE_GRID:
+        if variant not in candidates:
+            candidates.append(variant)
+    return tuple(candidates)
 
 
 def _title_read_budget():
@@ -141,6 +174,11 @@ def _title_words(rows):
             gap = x - old_x - old_width
             if gap < -2:
                 return ''  # 重叠词框不能证明文字先后关系。
+            # 远端元素（未读角标、工具按钮）在像素上和标题同高同基线，只有间距能分开：
+            # 真机「极客先锋社招新群（77）」右侧的未读角标被读成独立框后拼成了尾部 ' 0'。
+            # 超过这个间距就不是同一个标题了，它和它之后的框一律丢弃。
+            if gap >= max(12, 2 * min(height, old_height)):
+                break
             if gap >= max(3, min(height, old_height) * .25):
                 parts.append(' ')
         parts.append(text)
@@ -555,6 +593,7 @@ def readonly_gui_class(base):
         def current_chat_title(self):
             # 指纹必须和标题文本同帧产生：每次读取先作废，读失败时绝不能留下上一次的指纹。
             self._pixel_title_signature = None
+            self._pixel_title_ink = None
             self._pixel_title_evidence = {'state': 'capture_or_layout_error', 'passes': [],
                                           'family': '', 'families_tried': 0}
             try:
@@ -570,6 +609,15 @@ def readonly_gui_class(base):
             evidence = getattr(self, '_pixel_title_evidence', {})
             return dict(evidence, passes=[dict(row) for row in evidence.get('passes', [])])
 
+        def title_ink_image(self):
+            """最近一次标题读取算出的墨迹裁剪图（'L' 模式），供模板比对兜底使用。
+
+            每次读取开头都会作废，所以拿到的一定是最近这一帧的像素；读取没能走到墨迹
+            这一步（抓帧失败、标题区定不出来）时为 None。反过来，走到墨迹之后 OCR 仍
+            表决失败时这里保留图像——模板比对兜底正是为"读不出文字"准备的那一手。
+            """
+            return getattr(self, '_pixel_title_ink', None)
+
         def _read_chat_title(self):
             frame, geometry = self._pixel_frame()
             with frame:
@@ -583,6 +631,10 @@ def readonly_gui_class(base):
                 # 没变，不必重跑三份 OCR。与标题文本必须同帧，所以在这里记而不是另抓一帧。
                 self._pixel_title_signature = self._title_band_signature(frame, region, geometry)
                 ink = _title_ink_region(frame, region)
+                # frame 是上下文管理器，退出 with 后 crop 就不能再取像素；这里先复制并
+                # load 进内存，模板比对才能在同一次读取之外继续用这块墨迹。
+                self._pixel_title_ink = frame.crop(ink).convert('L')
+                self._pixel_title_ink.load()
                 passes, glyph_height = _title_passes(frame, ink)
                 self._pixel_title_evidence['glyph_height'] = glyph_height
                 self._pixel_title_evidence['profile'] = (
@@ -591,56 +643,77 @@ def readonly_gui_class(base):
                     else 'small' if passes is _SMALL_TITLE_PASSES
                     else 'legacy')
                 deadline = time.monotonic() + _title_read_budget()
-                outcomes = []
-                # 分级信任：族内三份完整读数一致才采信，整族作废才换下一族。全程不接收、
-                # 不比较期望会话名，所以回退族不是因为"更接近目标"而胜出，只是前一族没通过。
-                for family, variants in _title_pass_families(passes):
-                    self._pixel_title_evidence['families_tried'] += 1
-                    titles = []
-                    read_rows = 0
-                    for scale, threshold, padding, resample in variants:
-                        # 每跑一个变体前核对总预算：族排满时不能挤掉发送链路的既有时限。
-                        if time.monotonic() >= deadline:
-                            self._pixel_title_evidence['state'] = 'ocr_budget'
-                            return ''
-                        # 每个变体都用同一块实测墨迹，不用上一次的词框回推裁剪：
-                        # 上一次漏读一个字时，回推出来的裁剪会连带丢掉证据。
-                        self._pixel_title_evidence['state'] = 'ocr_error'
+                # 逐变体投票：真机上不同窗口尺寸的标题条像素落在不同变体表里，单帧内能读全
+                # 的变体很少且互不相同，"族内三份逐字一致"于是永远凑不齐（1918x1088 帧墨迹
+                # 高 18 走 medium 档、最大化 1920x1079 帧墨迹高 12 走 small 档，两档各自族内
+                # 都凑不齐），发送因此恒 title_unverified。改成每个变体各投一票、同一标题凑到
+                # 3 票且领先次高 2 票才采信。全程不接收、不比较期望会话名，所以网格兜底不是
+                # 因为"更接近目标"而胜出，只是前面的候选没投出达标票数。
+                families = _title_pass_families(passes)
+                owners = {}
+                for name, variants in families:
+                    for variant in variants:
+                        owners.setdefault(variant, name)
+                votes = {}
+                first_family = {}
+                families_tried = []
+                # 只有"OCR 区域超过限制"是变体自身的属性（4x/5x 倍率会顶到
+                # MAX_DIMENSION=4096），换下一个变体就有机会，不该中断整次读取；
+                # 其余异常照旧上抛，由 current_chat_title 记 exception_type。
+                from .isolated_wechat.protocol import ProtocolError
+                for variant in _title_candidates(passes):
+                    family = owners.get(variant, 'grid')
+                    if family != 'grid' and family not in families_tried:
+                        families_tried.append(family)
+                        self._pixel_title_evidence['families_tried'] = len(families_tried)
+                    # 每跑一个变体前核对总预算：候选排满时不能挤掉发送链路的既有时限。
+                    if time.monotonic() >= deadline:
+                        self._pixel_title_evidence['state'] = 'ocr_budget'
+                        return ''
+                    # 每个变体都用同一块实测墨迹，不用上一次的词框回推裁剪：
+                    # 上一次漏读一个字时，回推出来的裁剪会连带丢掉证据。
+                    self._pixel_title_evidence['state'] = 'ocr_error'
+                    scale, threshold, padding, resample = variant
+                    try:
                         rows = self._ocr_crop(frame, ink, scale=scale, threshold=threshold,
                                               padding=padding, resample=resample)
-                        rows = [(str(t).strip(), x, y, w, h) for t, x, y, w, h in rows
-                                if str(t).strip() and h >= 8 and x >= info['pane_left'] + 6
-                                and y + h <= region[3] and x + w <= region[2]]
-                        evidence = {'family': family, 'rows': len(rows),
-                                    'characters': 0, 'complete': False}
-                        self._pixel_title_evidence['passes'].append(evidence)
-                        if not rows:
-                            # 单个变体一行都读不出时不再立即判死：它只是没为这份证据出力，
-                            # 够不够格由族内聚合算（中等字号档本来就有读不出的变体）。
-                            continue
-                        read_rows += 1
-                        top = min(row[2] for row in rows)
-                        line = sorted((row for row in rows if abs(row[2] - top) <= 8),
-                                      key=lambda row: row[1])
-                        title = _title_words(line)
-                        evidence['characters'] = len(title)
-                        evidence['complete'] = bool(title and _complete_title_pixels(frame, region, line))
-                        # 读到框外墨迹说明这个变体漏了字：本次读数作废，本族也没了第三份
-                        # 旁证，剩下的变体再跑也凑不出三份一致，直接作废整族换下一族。
-                        if not evidence['complete']:
-                            break
-                        titles.append(title)
-                    # 不许挑选恰好匹配目标的那一次：任意两份完整读取文字不同即判不一致。
-                    if len(titles) == len(variants) and len(set(titles)) == 1:
-                        self._pixel_title_evidence['state'] = 'verified'
-                        self._pixel_title_evidence['family'] = family
-                        return titles[0]
-                    # 族作废的原因留着，末尾合并成原有那三个原因码，不新增语义。
-                    outcomes.append('disagreement' if len(set(titles)) > 1 else
-                                    'incomplete' if read_rows else 'ocr_empty')
+                    except ProtocolError as error:
+                        if '超过限制' not in str(error):
+                            raise
+                        rows = []
+                    rows = [(str(t).strip(), x, y, w, h) for t, x, y, w, h in rows
+                            if str(t).strip() and h >= 8 and x >= info['pane_left'] + 6
+                            and y + h <= region[3] and x + w <= region[2]]
+                    evidence = {'family': family, 'rows': len(rows),
+                                'characters': 0, 'complete': False}
+                    self._pixel_title_evidence['passes'].append(evidence)
+                    if not rows:
+                        # 一行都读不出只是没为这份证据出力，够不够格由总票数算。
+                        continue
+                    top = min(row[2] for row in rows)
+                    line = sorted((row for row in rows if abs(row[2] - top) <= 8),
+                                  key=lambda row: row[1])
+                    title = _title_words(line)
+                    evidence['characters'] = len(title)
+                    evidence['complete'] = bool(title and _complete_title_pixels(frame, region, line))
+                    # 读到框外墨迹说明这个变体漏了字：只作废这一次读数，不再像旧实现那样
+                    # 连带作废整族——别的变体仍可能读全整行。
+                    if not evidence['complete']:
+                        continue
+                    votes[title] = votes.get(title, 0) + 1
+                    first_family.setdefault(title, family)
+                # 票数只在全部变体跑完后才算：真机「极客先锋社招新群（77）」上，错读在第 24
+                # 个变体处以 5:3 触发了旧早停，正确读法随后才攒到 9 票，早停让它永远赢不了。
+                ranked = sorted(votes.values(), reverse=True)
+                if ranked and ranked[0] >= 3 and (len(ranked) == 1 or ranked[0] - ranked[1] >= 2):
+                    winner = max(votes, key=votes.get)
+                    self._pixel_title_evidence['state'] = 'verified'
+                    self._pixel_title_evidence['family'] = first_family[winner]
+                    return winner
+                # 绝不返回未经达标表决的标题：末尾仍合并成原有那三个原因码，不新增语义。
                 self._pixel_title_evidence['state'] = (
-                    'disagreement' if 'disagreement' in outcomes else
-                    'incomplete' if 'incomplete' in outcomes else 'ocr_empty')
+                    'disagreement' if len(votes) >= 2 else
+                    'incomplete' if votes else 'ocr_empty')
                 return ''
 
         def chat_title_signature(self):

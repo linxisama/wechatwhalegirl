@@ -40,7 +40,13 @@ class BandOCR:
         self.variants, self.text, self.calls = variants, text, []
 
     def recognize(self, image):
-        scale, _threshold, padding, _resample = self.variants[len(self.calls)]
+        # 1.3.89 起候选表是 profile 族 + 48 组基础网格，脚本答案用完后一律当作"读不出"，
+        # 否则 Mock 侧会以 IndexError 中断而不是模拟这一份没出力。
+        index = len(self.calls)
+        if index >= len(self.variants):
+            self.calls.append(image.size)
+            return []
+        scale, _threshold, padding, _resample = self.variants[index]
         self.calls.append(image.size)
         width, height = image.size
         return [(self.text, padding, padding,
@@ -158,7 +164,10 @@ class HeaderSourceTests(unittest.TestCase):
         self.assertEqual(evidence['state'], 'verified')
         self.assertEqual(evidence['profile'], 'small')
         self.assertEqual(evidence['family'], 'small')
-        self.assertEqual(len(provider.calls), 3)
+        # 1.3.90 去早停：小字号族三票到手后候选表仍要跑满，脚本答案用完后一律读不出。
+        ink = _title_ink_region(frame, gui._pixel_title_region)
+        self.assertEqual(len(provider.calls),
+                         len(pixel_gui._title_candidates(_title_passes(frame, ink)[0])))
 
     def test_fallback_still_refuses_when_no_header_evidence_exists(self):
         frame = Image.new('RGB', (1200, 800), (250, 250, 250))

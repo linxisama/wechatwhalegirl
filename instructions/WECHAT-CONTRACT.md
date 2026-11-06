@@ -1,3 +1,20 @@
+## 1.3.90 后台失败出口带码、标题去早停、群成员数后缀剥离、模板比对模块（未接线）
+
+- 后台失败码契约（新增）：`src/wechat_background.py:168` `_stop(info, code, reason)` 是失败出口的唯一写法——先 `info.update(ready=False, waiting_code=code)` 再返回 `False, reason`。任何新加的失败分支都必须带码；裸 `return False, '...'`（不写 `waiting_code`）会让卡片显示原始英文。码只能取 `src/send_history.py:30` `CODE_TEXT` 已收录的键，`tests/test_background_codes1390.py` 用 AST 静态校验「全字面量、非 `not_ready`、都能查到中文与 hint」；该文件现 14 例（`ExitCodeTests` 2 + `FixtureExitCodeTests` 12），静态校验对 27 处 `_stop` 调用点全部生效（其中 3 处传的是 `_current_bound_window` 返回的 `code`，不是字面量，AST 校验按第四元取值）。
+- 发送按钮拒绝契约（新增）：`_send_button`（`src/wechat_background.py:17-43`）必须区分四种情况——没有按钮、多个按钮、查找有读错误、控件树没遍历完，不许合并成一句。前两者沿用原句（`没有可直接调用的发送按钮；当前客户端不支持此后台通道`、`无法唯一确认发送按钮，请关闭微信内的其他发送对话框后复查`），后两者必须分别说明「读取错误」和「未遍历完整棵控件树」，否则用户会照「关掉其他发送框」的提示去修一个根本不是发送框的问题。诊断分别落在 `button_search` 与 `button_search_refresh` 两个键上（`:27-28` 写 `dict(lookup, buttons=len(buttons))`）。
+- 码语义契约：「未写入」类（`desktop_unavailable`/`chat_not_open`/`input_unavailable`/`draft`/`account_unverified`）表示正文没进输入框、一个键都没按；`send_failed` 只表示真的尝试发送但没成功。不得把「未写入」报成 `send_failed`，也不得为省事给 `_stop` 传 `send_failed`。
+- 标题表决契约补充：采信条件（≥3 票且领先 ≥2 票）与末尾三码不变，但**票数只在全部候选跑完后才排序**——不得恢复早停。真机错读会在中途某个变体上凑出 5:3，早停等于让错读锁定胜局。候选表顺序、`TITLE_READ_BUDGET=8.0`（`:62`）、只吞 `ProtocolError('超过限制')` 这三条都不变。
+- 标题匹配契约扩充（仍不是放宽）：`src/wechat_guia_send.py:903` `title_matches` 允许剥掉群标题结尾的成员数后缀 `（77）`/`(77)` 后再比一次，剥完必须完全相等；不做前缀、子串、相似度匹配。「极客先锋社招新群（77）」对「极客先锋社招新」仍是 False。
+- 墨迹契约：`src/wechat_pixel_gui.py:612` `title_ink_image()` 返回的图必须与标题文本同帧，每次读取开头作废；`frame` 退出 `with` 后不可再取像素，所以必须在 `:636-637` 当场 `crop` + `convert('L')` + `load()`。读失败返回 None，绝不能返回上一次的旧裁剪。
+- `src/wechat_title_template.py` 当前**不在发送链路里**：`src/` 内除自身无 import，只有测试引用它。接入前不得假定发送会用到模板比对。仍为内部测试候选，不制作正式安装包。
+
+## 1.3.89 标题读取改多数表决网格（profile 优先 + 48 组兜底 + 早停）
+
+- 标题表决契约（不是放宽）：采信条件是「同一标题 ≥3 票且领先次高 ≥2 票」，票只来自「读全整行」（`_complete_title_pixels` 为真）的变体；未达标一律不返回标题，末尾按原有三码归并（≥2 个不同完整读法 `disagreement`、只有一个读法但票不够 `incomplete`、一次完整读数都没有 `ocr_empty`）。`src/wechat_guia_send.py:807` 的 states 白名单仍 8 码，不新增。
+- 候选表契约：`src/wechat_pixel_gui.py:120-135` `_title_candidates()` 的返回顺序是「profile 族变体（按族序去重）在前、48 组 `_TITLE_BASE_GRID`（`:92-96`）里没出现过的在后」，去重保首次出现顺序。顺序有语义——早停靠它先命中实测优变体，不得按「哪组更像目标会话」重排。
+- 容错契约：`ProtocolError('OCR 区域超过限制')`（4x/5x 顶到 `src/isolated_wechat/ocr_relay.py:19` `MAX_DIMENSION=4096`）视为该变体 0 行、继续下一个候选；其它异常必须上抛，`current_chat_title` 依赖它记 `exception_type`。总预算 `TITLE_READ_BUDGET=8.0`（`:62`）不变，每个变体开跑前查预算，超了 `state='ocr_budget'` 并返回空标题。
+- 标题匹配契约不变：`src/wechat_guia_send.py:882` `title_matches` 仍精确相等；`_read_chat_title` 不接收、不比较期望会话名，网格兜底不是「更接近目标」而胜出。仍为内部测试候选，不制作正式安装包。
+
 ## 1.3.88 草稿清空误判、发送诊断落盘、DPI 探测修正、沙盒文案统一、DSH 人设依赖兼容
 
 - 草稿清空契约扩充（不是放宽）：除「`state == 'empty'`」与「`state == 'caret_like'` 且墨迹确实变少」之外，新增「不论 `state`，墨迹降到 `max(2, 40%)` 以内且 `columns <= 2`」也算已清空。`src/wechat_guia_send.py:1237` `_ink_cleared` 与 `src/wechat_pixel_gui.py:468` `composer_cleared` 两处判据必须同形，任何一处单独放宽都会让「清空后仍有草稿」的守卫失去意义。

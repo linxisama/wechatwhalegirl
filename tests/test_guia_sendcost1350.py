@@ -204,13 +204,16 @@ class TitleRegionCacheTests(unittest.TestCase):
         frame = medium_frame()
         provider = self.medium_provider(frame)
         gui = self.make_gui(frame, provider)
+        ink = pixel_gui._title_ink_region(frame, BAND)
+        plan = pixel_gui._title_candidates(pixel_gui._title_passes(frame, ink)[0])
         calls, patcher = counting_title_region()
         with patcher:
             title = gui.current_chat_title()
             after_title = len(provider.calls)
             signature = gui.chat_title_signature()
         self.assertEqual(title, TITLE)
-        self.assertEqual(after_title, 3, '全族三个变体各一次')
+        # 1.3.90-A 去早停后票只在整张候选表跑完才算：profile 族 + 48 组基础网格各一次。
+        self.assertEqual(after_title, len(plan), '候选表每个变体各一次')
         self.assertEqual(len(provider.calls), after_title, '取指纹不许再调用 OCR')
         self.assertEqual(len(calls), 1, '标题读取与随后的指纹读取必须共用一次区域解析')
         self.assertEqual(signature['digest'], gui.last_title_signature()['digest'],

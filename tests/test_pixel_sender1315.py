@@ -8,8 +8,8 @@ from PIL import Image, ImageDraw
 from src.wechat_layout import inspect_composer, draft_state, draft_has_text, title_region
 from src.wechat_ocr_labels import explain_send_button, locate_send_button
 from src.wechat_pixel_gui import (readonly_gui_class, ocr_provider, _title_words,
-                                   _MEDIUM_TITLE_FALLBACK_PASSES, _MEDIUM_TITLE_PASSES,
-                                   _TITLE_PASSES)
+                                   _title_candidates, _MEDIUM_TITLE_FALLBACK_PASSES,
+                                   _MEDIUM_TITLE_PASSES, _TITLE_PASSES)
 from src.wechat_guia_send import probe
 
 
@@ -323,17 +323,17 @@ class PixelGUIProtectionTests(unittest.TestCase):
     def test_title_uses_only_header_band_for_every_pass_and_preserves_space(self):
         provider = Mock()
         # 每次多倍率/预处理都要独立认出整行，正文里的文字不能参与标题判定。
-        provider.recognize.side_effect = [
-            [('文件传输助手', 40, 40, 336, 56), ('正文诱导', 52, 300, 120, 40)],
-            [('文件传输助手', 60, 60, 504, 84)],
-            [('文件传输助手', 80, 80, 672, 112)]]
+        # 候选表是 profile 族 + 48 组基础网格：脚本答案用完必须回空，否则 Mock 抛 StopIteration。
+        answers = [[('文件传输助手', 40, 40, 336, 56), ('正文诱导', 52, 300, 120, 40)],
+                   [('文件传输助手', 60, 60, 504, 84)],
+                   [('文件传输助手', 80, 80, 672, 112)]]
+        provider.recognize.side_effect = lambda _image: answers.pop(0) if answers else []
         with fixture_frame() as frame:
             gui = self.make_gui(frame, provider)
             self.assertEqual(gui.current_chat_title(), '文件传输助手')
-        provider.recognize.side_effect = [
-            [('Test A', 40, 40, 336, 56)],
-            [('Test A', 60, 60, 504, 84)],
-            [('Test A', 80, 80, 672, 112)]]
+        answers = [[('Test A', 40, 40, 336, 56)],
+                   [('Test A', 60, 60, 504, 84)],
+                   [('Test A', 80, 80, 672, 112)]]
         with fixture_frame() as frame:
             self.assertEqual(self.make_gui(frame, provider).current_chat_title(), 'Test A')
 
@@ -344,12 +344,17 @@ class PixelGUIProtectionTests(unittest.TestCase):
 
     def test_title_all_ocr_passes_must_agree_on_complete_name(self):
         provider = Mock()
-        provider.recognize.side_effect = [
-            [('Alice Smith', 40, 40, 336, 56)],
-            [('Alice', 60, 60, 270, 84)],
-            [('Alice', 80, 80, 360, 112)]]
+        # 三份读数互不相同且都不完整：1.3.89 起逐变体投票，凑不出 3 票一致就不采信。
+        answers = [[('Alice Smith', 40, 40, 336, 56)],
+                   [('Alice', 60, 60, 270, 84)],
+                   [('Alice', 80, 80, 360, 112)]]
+        provider.recognize.side_effect = lambda _image: (
+            answers.pop(0) if answers else [])  # 候选表远长于三份脚本答案
         with fixture_frame() as frame:
-            self.assertEqual(self.make_gui(frame, provider).current_chat_title(), '')
+            gui = self.make_gui(frame, provider)
+            self.assertEqual(gui.current_chat_title(), '')
+            # 三份互不相同的完整读数各一票，永远凑不到 3 票一致：判不一致，不采信。
+            self.assertEqual(gui.title_diagnostic()['state'], 'disagreement')
 
     def test_title_unrecognized_suffix_inside_the_band_cannot_match_a_shorter_name(self):
         provider = Mock()
@@ -362,13 +367,13 @@ class PixelGUIProtectionTests(unittest.TestCase):
             draw.rectangle((600, 40, 610, 57), fill='black')
             gui = self.make_gui(frame, provider)
             self.assertEqual(gui.current_chat_title(), '')
-        # 空读数不再短路，因此断言的是本次真的会尝试的变体（按表长度求和，不写死数字）：
-        # 这一帧前两族一个词框都读不出，各自三个变体全跑过；二值化族第一份就漏字、
-        # 凑不出三份旁证，整族当场作废，所以只进到它的第一个变体。
-        attempted = [row['family'] for row in gui.title_diagnostic()['passes']]
-        self.assertEqual(attempted, ['medium'] * len(_MEDIUM_TITLE_PASSES)
-                         + ['medium_fallback'] * len(_MEDIUM_TITLE_FALLBACK_PASSES)
-                         + ['medium_binarized'])
+        # 空读数与"漏字"读数都只是不投票，不再整族作废：1.3.89 起候选表 = profile 族
+        # 去重 + 48 组基础网格，全部跑完仍凑不出 3 票一致才判空。
+        evidence = gui.title_diagnostic()
+        attempted = [row['family'] for row in evidence['passes']]
+        self.assertEqual(evidence['state'], 'ocr_empty')
+        self.assertEqual(attempted[:3], ['medium'] * 3)
+        self.assertEqual(set(attempted[3:]), {'medium_fallback', 'medium_binarized', 'grid'})
         self.assertEqual(provider.recognize.call_count, len(attempted))
 
     def test_invalid_ocr_box_cannot_leave_a_partial_title(self):
@@ -376,10 +381,13 @@ class PixelGUIProtectionTests(unittest.TestCase):
         provider.recognize.return_value = [
             ('Alice', 33, 153, 105, 42), ('Smith', 0, -20, 100, 42)]
         with fixture_frame() as frame:
-            self.assertEqual(self.make_gui(frame, provider).current_chat_title(), '')
-        # 空读数不再短路，因此断言的是所有变体都跑过：这帧标题区没有墨迹（墨迹高 0），
-        # 只走旧式表这一族，所以是旧表长度的和。
-        self.assertEqual(provider.recognize.call_count, len(_TITLE_PASSES))
+            gui = self.make_gui(frame, provider)
+            self.assertEqual(gui.current_chat_title(), '')
+            # 空读数不再短路，因此断言的是所有候选都跑过：这帧标题区没有墨迹（墨迹高 0），
+            # profile 只剩旧式表三份，其余 48 组基础网格补位（一组与旧表重合，去重后 50）。
+            evidence = gui.title_diagnostic()
+        self.assertEqual(provider.recognize.call_count, len(evidence['passes']))
+        self.assertEqual(evidence['state'], 'ocr_empty')
 
     def test_missing_header_does_not_even_ocr_body(self):
         provider = Mock()

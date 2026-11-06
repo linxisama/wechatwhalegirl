@@ -45,6 +45,18 @@ CODE_TEXT = {
     'timeout': '超过发送时限',
     'no_caret': '找不到输入光标',
     'window_not_found': '找不到微信窗口',
+    # 1.3.90 起后台通道每个失败出口都带码，这里补齐中文，否则控制台会直接显示英文码。
+    'accessibility_unavailable': '微信没开放聊天输入控件',
+    'input_unavailable': '找不到可写的输入框',
+    'desktop_unavailable': '桌面已锁屏或会话已断开',
+    'account_unverified': '核对期间微信窗口或账号已改变',
+    'window_changed': '核对期间微信窗口已改变',
+    'window_query_failed': '查询微信窗口失败',
+    'submission_uncertain': '已尝试提交，未确认输入框清空',
+    'draft': '输入框里有草稿',
+    'unsupported_submit': '后台提交方式无效，未尝试输入',
+    'input_failed': '正文没有完整写入输入框，本次未按发送键',
+    'send_uncertain': '已按过发送键，结果待核实',
 }
 
 CODE_HINT = {
@@ -55,6 +67,17 @@ CODE_HINT = {
     'title_unverified': '请保留标题识别诊断；程序不会放宽目标核验或重发',
     'guia_unavailable': '请确认微信已登录、窗口未最小化、系统 OCR 可用后重试',
     'send_failed': '请核对聊天记录；输入框里的残留草稿需要手动清空',
+    'accessibility_unavailable': '先手动打开目标会话复查；仍无控件说明此客户端不支持后台通道',
+    'input_unavailable': '确认目标会话已打开；仍有问题重启微信',
+    'desktop_unavailable': '解锁桌面（或接回远程会话）后重试',
+    'account_unverified': '先只留一个微信窗口并确认登录的是本程序绑定的账号，再重试',
+    'window_changed': '先只留一个微信窗口并手动点开目标会话，再重试',
+    'window_query_failed': '确认微信已登录且没有卡死，再重试',
+    'submission_uncertain': '手动核对聊天记录；程序不会重发这条回复',
+    'draft': '清空微信输入框里的草稿',
+    'chat_not_open': '先在微信里手动点开目标会话（程序不会替你切会话）',
+    'minimized': '把微信窗口恢复，别最小化',
+    'unsupported_submit': '设置 → 发送通道改回默认（严格后台或兼容模式）后重新启动机器人',
 }
 
 

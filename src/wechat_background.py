@@ -14,7 +14,7 @@ def chat_name(field, expected=''):
     return clean_chat_name(name, expected)
 
 
-def _send_button(root, submit):
+def _send_button(root, submit, diagnostic=None, key='button_search'):
     """每次从当前树读取唯一按钮；不能跨写入复用 Qt 旧元素的调用模式。"""
     buttons, lookup = [], {}
     def collect(control):
@@ -22,10 +22,20 @@ def _send_button(root, submit):
             buttons.append(control)
         return False
     find_scoped(root, collect, diagnostic=lookup)
+    # 三种拒绝理由要分开说：只报"唯一确认"会让"树里有读错误"和"开着别的发送框"
+    # 看起来是同一种情况，用户照着提示关对话框永远修不好。
+    if diagnostic is not None:
+        diagnostic[key] = dict(lookup, buttons=len(buttons))
     if not buttons:
         return None, None, '没有可直接调用的发送按钮；当前客户端不支持此后台通道'
-    if len(buttons) != 1 or lookup.get('errors') or lookup.get('search_status') != 'exhausted':
+    if len(buttons) != 1:
         return None, None, '无法唯一确认发送按钮，请关闭微信内的其他发送对话框后复查'
+    if lookup.get('errors'):
+        return None, None, ('发送按钮查找遇到 %s 个读取错误，无法唯一确认；请关闭微信内的其他发送对话框后复查'
+                            % lookup['errors'])
+    if lookup.get('search_status') != 'exhausted':
+        return None, None, ('发送按钮查找未遍历完整棵控件树（%s），无法唯一确认；请关闭微信内的其他发送对话框后复查'
+                            % (lookup.get('search_status') or 'unknown'))
     button = buttons[0]
     invoke = button.GetInvokePattern() if submit == 'invoke' else None
     if invoke is None and submit == 'invoke':
@@ -57,14 +67,15 @@ def inspect_background(account_path='', who='', access=None, desktop_status=None
     diagnostic = {'ready': False, 'background_send': True, 'desktop_ready': ready,
                   'submit_verified': False}
     if not ready:
-        return dict(diagnostic, reason=reason), None
+        return dict(diagnostic, waiting_code='desktop_unavailable', reason=reason), None
     access = access or NativeWindowAccess()
     row, window = select_window(access, account_path)
     diagnostic.update(window)
-    def unavailable(reason,code='not_ready'):
+    # 每个失败出口都必须带码：裸 not_ready 在三张码表里都查不到，用户只会看到原始英文。
+    def unavailable(reason, code):
         return dict(diagnostic, ready=False, waiting_code=code,reason='严格后台等待：' + reason), None
     if row is None:
-        return unavailable(window['reason'], window.get('waiting_code') or 'not_ready')
+        return unavailable(window['reason'], window.get('waiting_code') or 'window_query_failed')
     if submit not in ('invoke', 'posted_enter'):
         return unavailable('后台提交方式无效，未尝试输入', 'unsupported_submit')
     diagnostic['submit_method'] = submit
@@ -101,7 +112,7 @@ def inspect_background(account_path='', who='', access=None, desktop_status=None
             ready, reason = (desktop_status or interactive_desktop_status)()
             diagnostic['desktop_ready'] = ready
             if not ready:
-                return unavailable(reason)
+                return unavailable(reason, 'desktop_unavailable')
             current_row, current_window = select_window(access, account_path)
             if not same_window_identity(current_row, row):
                 return unavailable('只读复查期间账号窗口已改变，未读取其他窗口', 'account_unverified')
@@ -119,7 +130,7 @@ def inspect_background(account_path='', who='', access=None, desktop_status=None
                 ready, reason = (desktop_status or interactive_desktop_status)()
                 diagnostic['desktop_ready'] = ready
                 if not ready:
-                    return unavailable(reason)
+                    return unavailable(reason, 'desktop_unavailable')
     if field is None:
         if lookup.get('errors'):
             return unavailable('后台控件读取失败，本次无法确认输入控件；未输入、未发送', 'input_unavailable')
@@ -133,15 +144,15 @@ def inspect_background(account_path='', who='', access=None, desktop_status=None
             return unavailable('请手动打开目标会话' + (f'「{who}」' if who else '') + '；不会自动切换','chat_not_open')
         value = field.GetValuePattern()
         if value is None or value.IsReadOnly:
-            return unavailable('当前输入控件不支持后台写入')
+            return unavailable('当前输入控件不支持后台写入', 'input_unavailable')
         if value.Value is None or str(value.Value):
             return unavailable('输入框已有草稿或无法回读；保留草稿，等待手动处理','draft')
         # 必须是同一窗口下明确的发送按钮，不能按坐标猜测或投递到任意窗口。
-        button, invoke, problem = _send_button(root, submit)
+        button, invoke, problem = _send_button(root, submit, diagnostic)
         if problem:
-            return unavailable(problem)
+            return unavailable(problem, 'accessibility_unavailable')
     except Exception as exc:
-        return unavailable(f'控件读取失败（{type(exc).__name__}），稍后复查')
+        return unavailable(f'控件读取失败（{type(exc).__name__}），稍后复查', 'input_unavailable')
     # 正常树查询和冷树刷新都可能跨越换窗/最小化/锁屏；成功出口必须同样复核。
     _, current, problem, code = _current_bound_window(access, account_path, row,
         desktop_status or interactive_desktop_status)
@@ -152,6 +163,12 @@ def inspect_background(account_path='', who='', access=None, desktop_status=None
         reason=('后台控件可读取，窗口投递为实验通道（未输入、未发送，未验证提交有效）'
                 if submit == 'posted_enter' else '严格后台控件可读取（未输入、未发送，未验证提交有效，不代表已验证送达）'))
     return diagnostic, (field, value, button, invoke)
+
+
+def _stop(info, code, reason):
+    """失败出口统一落码：只写诊断，不改正文，也不做任何补发。"""
+    info.update(ready=False, waiting_code=code)
+    return False, reason
 
 
 def send_background(job, phase, access=None, desktop_status=None):
@@ -166,6 +183,8 @@ def send_background(job, phase, access=None, desktop_status=None):
 def _send_background(job, phase, access=None, desktop_status=None):
     who, text = str(job.get('who') or ''), str(job.get('text') or '')
     if not valid_chat_name(who) or not text.strip():
+        job['_diagnostic'] = dict(job.get('_diagnostic') or {}, ready=False,
+            waiting_code='invalid_target', reason='后台目标名称或正文无效，本次未输入')
         return False, '后台目标名称或正文无效，本次未输入'
     desktop_status = desktop_status or interactive_desktop_status
     phase('window')
@@ -177,42 +196,51 @@ def _send_background(job, phase, access=None, desktop_status=None):
     if controls is None:
         return False, info['reason']
     field, value, button, invoke = controls
-    if not desktop_status()[0] or chat_name(field, who) != who or str(value.Value or ''):
-        return False, '后台输入前环境已改变，未写入正文'
+    # 三种"写前环境已变"分开落码：同一个笼统出口会把"没写入"报成发送失败。
+    if not desktop_status()[0]:
+        return _stop(info, 'desktop_unavailable', '后台输入前桌面已锁屏或断开，未写入正文')
+    if chat_name(field, who) != who:
+        return _stop(info, 'chat_not_open', '后台输入前会话已改变，未写入正文')
+    if str(value.Value or ''):
+        return _stop(info, 'draft', '后台输入前输入框已有草稿，未写入正文')
     phase('input')
     # 阶段记录可能阻塞，Qt也可能已重建输入框；旧field的标题和空值不能代表当前树。
     row, current, problem, code = _current_bound_window(access, job.get('account_path', ''), info, desktop_status)
     info.update(current)
     if problem:
-        info['waiting_code'] = code
-        return False, '写入前' + problem + '，未写入正文'
+        return _stop(info, code, '写入前' + problem + '，未写入正文')
     try:
         root = access.control(row['hwnd'])
         lookup = {}
         field = find_scoped(root, lambda c: c.ClassName == 'mmui::ChatInputField' or
             'chat_input_field' in str(c.AutomationId or '').split('.'), timeout=1, diagnostic=lookup)
         info['input_refresh_search'] = lookup
-        if field is None or lookup.get('errors') or chat_name(field, who) != who:
-            return False, '写入前当前输入控件或会话已改变，未写入正文'
+        if field is None or lookup.get('errors'):
+            return _stop(info, 'input_unavailable', '写入前当前输入控件已改变，未写入正文')
+        if chat_name(field, who) != who:
+            return _stop(info, 'chat_not_open', '写入前会话已改变，未写入正文')
         value = field.GetValuePattern()
-        if value is None or value.IsReadOnly or value.Value != '':
-            return False, '写入前草稿或输入状态已改变，未覆盖用户输入'
+        if value is None or value.IsReadOnly:
+            return _stop(info, 'input_unavailable', '写入前输入控件不支持后台写入，未覆盖用户输入')
+        if value.Value != '':
+            return _stop(info, 'draft', '写入前草稿已改变，未覆盖用户输入')
     except Exception as error:
         info['input_refresh_exception_type'] = type(error).__name__
-        return False, '写入前控件复核失败，未写入正文'
+        return _stop(info, 'input_unavailable', '写入前控件复核失败，未写入正文')
     _, current, problem, code = _current_bound_window(access, job.get('account_path', ''), info, desktop_status)
     info.update(current)
     if problem:
-        info['waiting_code'] = code
-        return False, '写入前' + problem + '，未写入正文'
-    if chat_name(field, who) != who or value.Value != '':
-        return False, '写入前目标或草稿已改变，未覆盖用户输入'
+        return _stop(info, code, '写入前' + problem + '，未写入正文')
+    if chat_name(field, who) != who:
+        return _stop(info, 'chat_not_open', '写入前目标已改变，未覆盖用户输入')
+    if value.Value != '':
+        return _stop(info, 'draft', '写入前草稿已改变，未覆盖用户输入')
     info['input_controls_refreshed'] = True
     value.SetValue(text)
     phase('readback')
     expected = text.replace('\r\n', '\n')
     if not desktop_status()[0]:
-        return False, '后台提交前桌面状态改变，本次未提交；请检查输入框草稿'
+        return _stop(info, 'desktop_unavailable', '后台提交前桌面状态改变，本次未提交；请检查输入框草稿')
     if submit == 'invoke':
         # SetValue 可能使 Qt 重建按钮甚至整个输入控件。重新读取时仍只认同一
         # 账号窗口、精确会话和完整正文；写后不先读取可能已失效的旧 COM 对象。
@@ -220,39 +248,42 @@ def _send_background(job, phase, access=None, desktop_status=None):
             row, current = select_window(access, job.get('account_path', ''))
             if (not same_window_identity(row, info) or current.get('matched_count') != 1
                     or row.get('minimized')):
-                info['waiting_code'] = 'account_unverified'
-                return False, '提交前账号窗口改变，本次未提交；请检查草稿'
+                return _stop(info, 'account_unverified', '提交前账号窗口改变，本次未提交；请检查草稿')
             root = access.control(row['hwnd'])
             field = find_scoped(root, lambda c: c.ClassName == 'mmui::ChatInputField' or
                                 'chat_input_field' in str(c.AutomationId or '').split('.'))
             if field is None or chat_name(field, who) != who:
-                return False, '后台提交前会话或状态改变，本次未提交；请检查输入框草稿'
+                return _stop(info, 'chat_not_open', '后台提交前会话或状态改变，本次未提交；请检查输入框草稿')
             value = field.GetValuePattern()
-            if (value is None or value.IsReadOnly
-                    or str(value.Value or '').replace('\r\n', '\n') != expected):
-                return False, '后台正文回读不一致或输入控件改变，本次未提交；请检查输入框草稿'
-            button, invoke, problem = _send_button(root, submit)
+            if value is None or value.IsReadOnly:
+                return _stop(info, 'input_unavailable', '后台提交前输入控件不可写，本次未提交；请检查输入框草稿')
+            if str(value.Value or '').replace('\r\n', '\n') != expected:
+                return _stop(info, 'draft', '后台正文回读不一致，本次未提交；请检查输入框草稿')
+            button, invoke, problem = _send_button(root, submit, info, 'button_search_refresh')
             if problem:
-                return False, '提交前' + problem + '；本次未提交，保留草稿'
+                return _stop(info, 'accessibility_unavailable', '提交前' + problem + '；本次未提交，保留草稿')
             info['controls_refreshed'] = True
         except Exception as exc:
             info['refresh_exception_type'] = type(exc).__name__
-            return False, '提交前控件复核失败，本次未提交；请检查草稿'
+            return _stop(info, 'input_unavailable', '提交前控件复核失败，本次未提交；请检查草稿')
     else:
         if str(value.Value or '').replace('\r\n', '\n') != expected:
-            return False, '后台正文回读不一致，本次未提交；请检查输入框草稿'
+            return _stop(info, 'draft', '后台正文回读不一致，本次未提交；请检查输入框草稿')
         if chat_name(field, who) != who:
-            return False, '后台提交前会话或状态改变，本次未提交；请检查输入框草稿'
-    if not desktop_status()[0] or not button.IsEnabled:
-        return False, '后台提交前桌面或发送按钮不可用，本次未提交；请检查草稿'
+            return _stop(info, 'chat_not_open', '后台提交前会话或状态改变，本次未提交；请检查输入框草稿')
+    if not desktop_status()[0]:
+        return _stop(info, 'desktop_unavailable', '后台提交前桌面状态改变，本次未提交；请检查草稿')
+    if not button.IsEnabled:
+        return _stop(info, 'accessibility_unavailable', '后台提交前发送按钮不可用，本次未提交；请检查草稿')
     phase('send_key')
     _, current, problem, code = _current_bound_window(access, job.get('account_path', ''), info, desktop_status)
     info.update(current)
     if problem:
-        info['waiting_code'] = code
-        return False, '提交前' + problem + '；本次未提交，保留草稿'
-    if chat_name(field, who) != who or str(value.Value or '').replace('\r\n', '\n') != expected:
-        return False, '提交前目标或正文已改变，本次不重发，请检查草稿'
+        return _stop(info, code, '提交前' + problem + '；本次未提交，保留草稿')
+    if chat_name(field, who) != who:
+        return _stop(info, 'chat_not_open', '提交前目标已改变，本次不重发，请检查草稿')
+    if str(value.Value or '').replace('\r\n', '\n') != expected:
+        return _stop(info, 'draft', '提交前正文已改变，本次不重发，请检查草稿')
     # Invoke抛异常也可能已经被微信接收，必须先标记未知，禁止任何前台兜底。
     info['submission_state'] = 'uncertain'
     info['submit_call_returned'] = False
@@ -261,8 +292,8 @@ def _send_background(job, phase, access=None, desktop_status=None):
             row, current = select_window(access, job.get('account_path', ''))
             if (not same_window_identity(row, info) or current.get('matched_count') != 1
                     or row['minimized']):
-                info.update(ready=False, submission_state='not_submitted', waiting_code='account_unverified')
-                return False, '投递前账号窗口改变，本次未提交；请检查草稿'
+                info['submission_state'] = 'not_submitted'
+                return _stop(info, 'account_unverified', '投递前账号窗口改变，本次未提交；请检查草稿')
             # 与Invoke互斥：只选择一个提交原语，不进行第二种发送尝试。
             if not access.post_enter(row['hwnd']):
                 raise RuntimeError('window message rejected')
