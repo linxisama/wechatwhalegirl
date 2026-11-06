@@ -44,12 +44,18 @@ class AttachmentsDialog(QDialog):
         def loaded(data):
             self.items.clear();self.text.clear()
             for r in data.get('items') or []:
-                item=QListWidgetItem(r['name']+f" · {r.get('chars',0)}字"+('（节选）' if r.get('truncated') else ''))
+                label=r['name']+f" · {r.get('chars',0)}字"+('（节选）' if r.get('truncated') else '')
+                item=QListWidgetItem(label)
+                # 列表宽度不够时文件名会被省略号截断，悬停要能看到完整文件名。
+                item.setToolTip(r['name'])
                 item.setData(Qt.ItemDataRole.UserRole,r)
                 item.setFlags(item.flags()|Qt.ItemFlag.ItemIsUserCheckable)
                 item.setCheckState(Qt.CheckState.Checked if r['id'] in [x['id'] for x in self.chosen] else Qt.CheckState.Unchecked)
                 self.items.addItem(item)
-            self.status.setText(f'本地主人附件 {self.items.count()}/50份；勾选需要引用的资料。')
+            if self.items.count():
+                self.status.setText(f'本地主人附件 {self.items.count()}/50份；勾选需要引用的资料。')
+            else:
+                self.status.setText('附件库还是空的：点“上传文件或语音…”添加，单文件 8MB，最多保留 50 份。')
         self.call('GET','agent/workspace/attachments',None,loaded)
 
     def preview(self,item,*_):

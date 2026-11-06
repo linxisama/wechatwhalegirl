@@ -22,13 +22,35 @@ class SafetyDialog(QDialog):
         layout.addWidget(self.confirmation)
         self.notice=QLabel('只在已完成官方处理后输入确认文字。解除的只是机器人暂停，不证明账号已恢复。')
         self.notice.setWordWrap(True);self.notice.setTextFormat(Qt.TextFormat.PlainText);layout.addWidget(self.notice)
-        button=QPushButton('解除机器人暂停（不自动启动）')
-        button.clicked.connect(self.clear);layout.addWidget(button)
+        self._busy=False
+        self.button=QPushButton('解除机器人暂停（不自动启动）')
+        self.button.clicked.connect(self.clear);layout.addWidget(self.button)
         close=QPushButton('保持暂停并关闭');close.clicked.connect(self.accept);layout.addWidget(close)
 
+    def _set_busy(self,busy):
+        """提交期间锁住按钮：连点两次会发出两个解除请求，第二个的回复容易让人误判当前状态。"""
+        self._busy=bool(busy)
+        self.button.setEnabled(not self._busy)
+        self.button.setText('正在解除…' if self._busy else '解除机器人暂停（不自动启动）')
+
     def clear(self):
+        if self._busy:
+            return
         if self.confirmation.text().strip()!=RESET_PHRASE:
             self.notice.setText('请先完成微信官方安全验证，再输入：'+RESET_PHRASE)
             return
-        self.request(self,'POST','wechat/safety/reset',{'confirmation':self.confirmation.text().strip()},
-            timeout=10,on_done=lambda d:self.notice.setText(str(d.get('message') or d.get('detail') or '未解除暂停')))
+        self._set_busy(True)
+        self.notice.setText('已提交解除请求，等待本机后台确认…')
+        def finished(value):
+            self._set_busy(False)
+            data=value if isinstance(value,dict) else {}
+            ok=bool(data.get('success'))
+            detail=str(data.get('message') or data.get('detail')
+                or ('操作完成' if ok else '后台未返回结果，请检查本机后台连接'))
+            self.notice.setText(('已解除机器人暂停：' if ok else '未解除暂停：')+detail)
+        try:
+            self.request(self,'POST','wechat/safety/reset',{'confirmation':self.confirmation.text().strip()},
+                timeout=10,on_done=finished)
+        except Exception as exc:
+            self._set_busy(False)
+            self.notice.setText(f'解除失败：{exc}')

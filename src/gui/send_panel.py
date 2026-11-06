@@ -4,7 +4,7 @@
 backend.log 满 5MB 就轮转，只读日志尾部会把十几分钟前的失败冲掉。
 边界：只发一个 GET，不重发、不清草稿、不改任何设置；日志里的会话名本来就是打码的。
 """
-from PyQt6.QtCore import QTimer
+from PyQt6.QtCore import Qt,QTimer
 from PyQt6.QtWidgets import QWidget,QVBoxLayout,QHBoxLayout,QLabel,QPushButton,QTextEdit
 
 
@@ -38,9 +38,12 @@ class SendPanel(QWidget):
         box.addLayout(row)
         self.summary=QLabel('概览：尚未读取')
         self.summary.setWordWrap(True)
+        self.summary.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         box.addWidget(self.summary)
         self.failure=QLabel('最近一次失败：尚未读取')
         self.failure.setWordWrap(True)
+        # 失败说明要能选中复制：用户报障时抄的就是这段失败码与建议。
+        self.failure.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         box.addWidget(self.failure)
         self.text=QTextEdit()
         self.text.setReadOnly(True)
@@ -144,5 +147,10 @@ class SendPanel(QWidget):
         else:
             text='最近一次失败：无（最近 7 天的发送记录里没有失败）'
         self.failure.setText(text)
+        # 悬停给出整段失败说明，方便用户一次抄全。注意 who 在写记录时就被
+        # mask_chat_name 截成 8 字 + …（src/logging_setup.py:548-553），界面拿不到完整会话名，
+        # 所以只能如实写"记录里的会话名"。
+        raw=str(last.get('who') or '') if isinstance(last,dict) else ''
+        self.failure.setToolTip(text+(('\n记录里的会话名：'+raw) if raw else ''))
         self.text.setPlainText('\n'.join(self.lines()))
         self.notice.setText('已更新（只读）')

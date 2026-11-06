@@ -10,7 +10,7 @@ from PyQt6.QtWidgets import (QWidget,QVBoxLayout,QHBoxLayout,QLabel,QPushButton,
 
 class ConversationArchive(QWidget):
     def __init__(self,request):
-        super().__init__();self.request=request;self.offset=0;self.account='';self.records=[];self.busy=False
+        super().__init__();self.request=request;self.offset=0;self.account='';self.records=[];self.busy=False;self._query_text=''
         layout=QVBoxLayout(self)
         hint=QLabel('这里保存本机监听到的聊天原文和已发送回复，按账号、群聊/私聊隔离，重启后保留。启用“长期记忆与群友档案”后，回答时自动检索同一会话的相关旧记录；无需逐条手动添加。节省 Token 只压缩本轮输入，不删除这里的记录。')
         hint.setWordWrap(True);layout.addWidget(hint)
@@ -48,6 +48,9 @@ class ConversationArchive(QWidget):
     def load(self,reset=False):
         if reset:self.offset=0
         query=self.query();query.update(q=self.search.text().strip(),offset=self.offset)
+        # 空态文案要引用"这一次查询用的词"：请求还在路上时用户可能已经改了搜索框，
+        # 读实时输入会把一个没查过的词写进"没有匹配记录"。
+        self._query_text=query['q']
         self.call('GET','dialogue/archive?'+urlencode(query),done=self.loaded)
 
     def loaded(self,result):
@@ -63,7 +66,15 @@ class ConversationArchive(QWidget):
             lines.append(f"{stamp} · {row['sender_name']} · {row['sender_id']}\n{row['content']}\n"
                          +(f"已发送回复（{row['persona'] or '旧版人设'}）：{row['reply']}" if row['reply'] else ''))
             self.selected.addItem(f"{stamp} · {row['sender_name']} · {row['content'][:40]}",row['key'])
-        self.text.setPlainText('\n\n'.join(lines) or '请选择会话并点击“读取 / 搜索”。')
+        if lines:
+            empty=''
+        elif not chosen['target']:
+            empty='请先在上方选择会话，再点击“读取 / 搜索”。'
+        elif self._query_text:
+            empty=f"当前会话没有包含“{self._query_text}”的记录；换个词或清空搜索框再读一次。"
+        else:
+            empty='当前会话还没有本地记录；连上微信、收到消息并回复后才会出现。'
+        self.text.setPlainText('\n\n'.join(lines) or empty)
         self.notice.setText(f"共 {result.get('total',0)} 条匹配记录，本页 {len(self.records)} 条；偏移 {self.offset}。导出最多最近 2000 条，原记录继续保留。")
 
     def page(self,amount):
@@ -105,7 +116,12 @@ class ConversationArchive(QWidget):
 
     def delete(self,clear):
         query=self.query()
-        if not query['target'] or not clear and not self.selected.currentData():return
+        if not query['target']:
+            self.notice.setText('请先选择会话，再删除记录。')
+            return
+        if not clear and not self.selected.currentData():
+            self.notice.setText('请先在上方“选择要删除的单条记录”里选一条，或改用“清空当前会话记忆”。')
+            return
         if QMessageBox.question(self,'删除本地记忆','确认清空当前会话的全部对话记忆？' if clear else '确认删除选定记录？',
             QMessageBox.StandardButton.Yes|QMessageBox.StandardButton.No,QMessageBox.StandardButton.No)!=QMessageBox.StandardButton.Yes:return
         self.call('POST','dialogue/archive/delete',dict(query,account=self.account,clear=clear,
