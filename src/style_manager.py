@@ -2,6 +2,7 @@
 
 from pathlib import Path
 from dataclasses import dataclass, field
+import math
 import re
 from .persistence import atomic_text
 from .text_matching import configured_terms
@@ -14,6 +15,35 @@ DEFAULT_PERSONA = "tsundere_whale_girl"
 
 # 人设名允许的字符（同时会作为 *.yaml 文件名，必须防目录穿越）
 PERSONA_NAME_RE = re.compile(r"^[A-Za-z0-9_\-]{1,48}$")
+
+# 显示名比较时忽略的字符：只差一个「·」或空格的人设在界面上根本分不清
+_DISPLAY_NOISE = set(" \t\r\n\u3000·・.．-—_~～、,，。:：;；!！?？")
+
+
+def _safe_int(value, default: int, low: int, high: int) -> int:
+    """人设文件里的数字不可信：非数字/空/负数回退默认值，越界钳到区间内。"""
+    try:
+        number = int(float(value))
+    except (TypeError, ValueError, OverflowError):
+        return default
+    if number <= 0:
+        return default
+    return min(max(number, low), high)
+
+
+def _safe_number(value, default: float, low: float, high: float) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return default
+    if not math.isfinite(number):
+        return default
+    return min(max(number, low), high)
+
+
+def _near_display(value: str) -> str:
+    """把显示名压成可比较形态：「鲸鱼娘」与「鲸鱼娘·」视为同一个。"""
+    return "".join(ch for ch in str(value or "") if ch not in _DISPLAY_NOISE).lower()
 
 
 @dataclass
@@ -91,7 +121,10 @@ class ChatStyle:
         # 身份锁放在**最末尾**（模型对提示词尾部权重最高，recency effect）：
         # 人设正文在前段容易被"通用回复规范/示例"稀释成客服腔，这里把"你是谁、
         # 不能被带跑"钉死，保证人设鲜明、不被对话或 prompt 注入改掉。
-        display = str(getattr(self, "display_name", "") or "").strip()
+        # 显示名为空时必须回退到标识：否则整段身份锁不会写进提示词，
+        # 模型会被历史对话或插件规则带成通用客服腔。
+        display = (str(getattr(self, "display_name", "") or "").strip()
+                   or str(getattr(self, "name", "") or "").strip())
         if display:
             parts.append(
                 f"【身份锁·最高优先级】你的唯一身份永远是「{display}」，"
@@ -119,25 +152,35 @@ class StyleManager:
         self.custom_dir = Path(custom_dir)
         self._locked_name = locked_name
         self._styles: dict[str, ChatStyle] = {}
+        # 每个名字是内置还是自定义；同名冲突靠它判断，不再"后加载的说了算"
+        self._origins: dict[str, str] = {}
+        # load_all 期间发现的同名/重复文件，供 diagnose_persona_conflicts 上报
+        self._conflicts: list[dict] = []
+        # 每个名字最终来自哪个文件：诊断里要告诉用户"该删哪个"
+        self._sources: dict[str, Path] = {}
         self._active: str = "default"
 
     def load_all(self) -> None:
         """加载所有风格文件"""
         self._styles.clear()
+        self._origins.clear()
+        self._conflicts = []
+        self._sources.clear()
 
         # 加载内置风格
         if self.styles_dir.exists():
-            for f in self.styles_dir.glob("*.yaml"):
-                self._load_style_file(f)
+            for f in sorted(self.styles_dir.glob("*.yaml")):
+                self._load_style_file(f, "builtin")
 
         # 加载自定义风格
         if self.custom_dir.exists():
-            for f in self.custom_dir.glob("*.yaml"):
-                self._load_style_file(f)
+            for f in sorted(self.custom_dir.glob("*.yaml")):
+                self._load_style_file(f, "custom")
 
         # 确保至少有默认风格
         if "default" not in self._styles:
             self._styles["default"] = self._default_style()
+            self._origins["default"] = "builtin"
 
         if self._locked_name:
             if self._locked_name in self._styles:
@@ -154,8 +197,12 @@ class StyleManager:
 
         logger.info(f"已加载 {len(self._styles)} 种风格: {list(self._styles.keys())}")
 
-    def _load_style_file(self, path: Path) -> None:
-        """加载单个风格文件"""
+    def _load_style_file(self, path: Path, origin: str = "builtin") -> None:
+        """加载单个风格文件。
+
+        ``origin`` 是 builtin / custom：同名时靠它判断"谁顶掉了谁"并记进
+        ``_conflicts``，不再让后加载的静默覆盖。
+        """
         try:
             with open(path, "r", encoding="utf-8") as f:
                 data = yaml.safe_load(f)
@@ -168,15 +215,62 @@ class StyleManager:
                 display_name=data.get("display_name", data["name"]),
                 description=data.get("description", ""),
                 system_prompt=data.get("system_prompt", ""),
-                temperature=data.get("temperature", 0.7),
-                max_tokens=data.get("max_tokens", 500),
+                # 人设文件里的数字不可信：缺字段/写错类型/写 0 都退回默认值，
+                # 免得 max_tokens=0 或 NaN 一路传到模型调用那里报错。
+                temperature=_safe_number(data.get("temperature"), 0.7, 0.0, 2.0),
+                max_tokens=_safe_int(data.get("max_tokens"), 500, 16, 8000),
                 examples=data.get("examples", []),
                 keywords=list(dict.fromkeys(v.strip() for v in configured_terms(data.get('keywords',[])) if v.strip())),
                 image=str(data.get('image') or ''),image_note=str(data.get('image_note') or ''),
             )
+            previous = self._origins.get(style.name)
+            if previous:
+                # 同名两份：运行时仍用最后加载的那份（用户自定义优先），
+                # 但必须留痕 —— 否则界面上两份同名，内置那份永远改不了也删不掉。
+                self._conflicts.append({
+                    "kind": "same_name",
+                    "name": style.name,
+                    "previous": previous,
+                    "current": origin,
+                    "previous_file": str(self._sources.get(style.name) or ""),
+                    "current_file": str(path),
+                })
+                logger.warning(f"人设同名冲突：{style.name} 的 {previous} 版本被 {origin} 版本覆盖")
+            # 名字不同、显示名只差一个「·」或空格：界面上根本分不清是谁。
+            # 这种不覆盖（两份都得留着），但必须留痕，否则用户永远不知道有两份。
+            normalized = _near_display(style.display_name)
+            if normalized:
+                for other_name, other in self._styles.items():
+                    if other_name != style.name and _near_display(other.display_name) == normalized:
+                        self._conflicts.append({
+                            "kind": "near_display",
+                            "name": style.name,
+                            "other_name": other_name,
+                            "previous": self._origins.get(other_name, ""),
+                            "current": origin,
+                            "previous_file": str(self._sources.get(other_name) or ""),
+                            "current_file": str(path),
+                        })
+                        logger.warning(
+                            f"人设显示名近似冲突：{style.name}「{style.display_name}」与 "
+                            f"{other_name}「{other.display_name}」在界面上无法区分")
             self._styles[style.name] = style
+            self._origins[style.name] = origin
+            self._sources[style.name] = path
         except Exception as e:
             logger.error(f"加载风格文件失败 {path}: {e}")
+
+    def _forget(self, name: str) -> None:
+        """把一个名字的来历一并清掉。
+
+        改名与删除都只动 _styles，_origins / _sources / _conflicts 会留下指向
+        已不存在文件或已不存在人设的脏记录；诊断据此告诉用户"该删哪个文件"时
+        就会指到一个空处，同名副本分支也会误判来历。
+        """
+        self._origins.pop(name, None)
+        self._sources.pop(name, None)
+        self._conflicts = [item for item in self._conflicts
+                           if name not in (item.get("name"), item.get("other_name"))]
 
     def get(self, name: str | None = None) -> ChatStyle:
         """获取指定风格，不存在则返回默认风格"""
@@ -223,6 +317,10 @@ class StyleManager:
         data = style.to_dict()
         atomic_text(path,yaml.safe_dump(data,allow_unicode=True))
         self._styles[style.name] = style
+        # 来源必须跟着一起记：remove_style 靠它判断"这是不是顶掉内置人设的副本"，
+        # 漏记的话这份副本会被当成内置人设，既删不掉也恢复不了内置那份。
+        self._origins[style.name] = "custom"
+        self._sources[style.name] = path
         logger.info(f"添加风格: {style.name}")
 
     # ── 人设编辑（供 GUI 的自定义人设界面使用）────────────────────────────────
@@ -302,6 +400,7 @@ class StyleManager:
             if old_custom.exists():
                 old_custom.unlink()
             self._styles.pop(original, None)
+            self._forget(original)
 
         if original == self._active:
             self._active = name
@@ -353,6 +452,16 @@ class StyleManager:
         # 检查是否为内置风格
         builtin_path = self.styles_dir / f"{name}.yaml"
         if builtin_path.exists():
+            # 同名自定义副本顶掉了内置人设：这里删的是副本，删完内置那份立刻回到可用状态。
+            # 旧行为一律拒删，导致这份副本永远删不掉、内置人设也永远回不来。
+            shadow = self.custom_dir / f"{name}.yaml"
+            if self._origins.get(name) == "custom" and shadow.exists():
+                shadow.unlink()
+                self._styles.pop(name, None)
+                self._forget(name)
+                self._load_style_file(builtin_path, "builtin")
+                logger.info(f"已删除同名自定义副本，恢复内置人设: {name}")
+                return True
             logger.warning(f"不能删除内置风格: {name}")
             return False
 
@@ -363,6 +472,7 @@ class StyleManager:
 
         if name in self._styles:
             del self._styles[name]
+        self._forget(name)
 
         # 如果删除的是当前风格，切换到默认
         if self._active == name:
