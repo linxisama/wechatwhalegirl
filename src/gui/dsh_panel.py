@@ -30,6 +30,21 @@ def _plain(value):
     return '—' if value is None or value == '' else str(value)
 
 
+def _code_lines(data):
+    """把后端给的连接码渲染成两行中文；缺字段就少一行，绝不让界面因为码崩掉。"""
+    if not isinstance(data, dict):
+        return []
+    code = str(data.get('code') or '').strip()
+    if not code:
+        return []
+    text = str(data.get('code_text') or '').strip()
+    hint = str(data.get('code_hint') or '').strip()
+    lines = ['连接码：' + code + ('（' + text + '）' if text else '')]
+    if hint:
+        lines.append('下一步：' + hint)
+    return lines
+
+
 def normalize_url(text):
     """返回（可保存地址, 错误文案）。本机只用 http，其它协议一律不提交。"""
     value = (text or '').strip()
@@ -406,9 +421,14 @@ class DshDialog(QDialog):
         self.timeout.setValue(int(timeout) if isinstance(timeout, (int, float)) and not isinstance(timeout, bool) else 60)
         self._fill_providers()
         stage = str(data.get('stage') or '未检测')
-        self.status.setText('状态：' + stage + '；'
+        text = ('状态：' + stage + '；'
             + str(data.get('last_error') or '请保存后检测协议和专用人设')
             + ('' if stage in LIVE_STAGES else '\n' + ANNOUNCE_RECONNECT))
+        # 有码就把「是什么/怎么办」贴在状态下面：用户不用点「查看详情」才知道下一步做什么。
+        code = _code_lines(data)
+        if code:
+            text += '\n' + '\n'.join(code)
+        self.status.setText(text)
         self._apply_announce(data)
 
     def _apply_announce(self, data):
@@ -425,6 +445,7 @@ class DshDialog(QDialog):
         state = str(data.get('state') or '')
         if state:
             lines.append('状态：' + state + '（' + STATE_LABELS.get(state, '未识别') + '）')
+        lines.extend(_code_lines(data))
         ports = data.get('checked_ports')
         if isinstance(ports, int) and not isinstance(ports, bool):
             extra = ''

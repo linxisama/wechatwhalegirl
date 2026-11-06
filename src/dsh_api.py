@@ -32,6 +32,13 @@ def announce_message(message, limit=160):
     return (text or 'DSH上报未完成')[:limit]
 
 
+def _stage_code(service):
+    """桥的阶段 → 连接码；只有明确的失败/就绪阶段给码，其余交给 last_error 归类。"""
+    stage = str(getattr(service, 'stage', '') or '')
+    return {'failed': 'dsh_unreachable', 'preset_missing': 'dsh_preset_missing',
+            'ready': 'dsh_ok'}.get(stage, '')
+
+
 def add_routes(app):
     def record_announce(bot, state, base_url, message):
         # 只存内存：控制台重启后回到null是预期，既不写配置也不进数据库。
@@ -66,16 +73,21 @@ def add_routes(app):
     async def discover():
         bot = app.state.bot
         require_bound(bot)
-        from .dsh_discovery import discover as find
+        from .dsh_discovery import CODE_HINT, CODE_TEXT, code_for_state, discover as find
         try:
-            async with __import__('asyncio').timeout(15): return await find(bot.dsh)
+            # 发现自己带 12 秒预算并会返回 timeout 结果；这里 15 秒只是最后一道闸。
+            async with __import__('asyncio').timeout(15):
+                return await find(bot.dsh)
         except (DshError,TimeoutError):
-            # 超时也是一次失败，必须给出和“没找到进程”同样的可执行下一步。
+            # 超时不是「没找到进程」：说成没启动会让用户去开一个已经在跑的程序。
+            code = 'dsh_timeout'
             return {'success':False,'candidates':[],'process_count':0,'checked_ports':0,
-                    'unverified_ports':0,'state':'process_missing','drift':None,
+                    'unverified_ports':0,'state':'timeout','drift':None,'code':code,
+                    'code_text':CODE_TEXT[code],'code_hint':CODE_HINT[code],
                     'saved_base_url':bot.dsh.settings()['base_url'],
-                    'hint':'未找到 DSH 进程，请先启动桌面 DSH',
-                    'message':'DSH自动查找未在15秒内完成；请先启动并登录桌面 DSH 后重试，或手动填写地址'}
+                    'hint':CODE_HINT[code],
+                    'message':'DSH自动查找未在15秒内完成（' + CODE_TEXT[code] + '）；'
+                              + CODE_HINT[code]}
 
     @app.get('/api/dsh/catalog')
     async def catalog():
@@ -90,9 +102,17 @@ def add_routes(app):
     @app.get('/api/dsh')
     async def status():
         service = app.state.bot.dsh
+        from .dsh_discovery import (CODE_HINT, CODE_TEXT, code_for_message,
+                                    describe_code, hint_for_code)
+        # 界面过去只拿得到 stage 与一句英文异常类型；这里把「是什么/怎么办」两句话一起给出来。
+        # 同样是 stage=failed，鉴权失败与端口没开不是一回事：先按 last_error 归类，认不出来才退回阶段码。
+        code = code_for_message(getattr(service, 'last_error', '')) or _stage_code(service)
         return {'success': True, **service.settings(), 'stage': service.stage,
                 'last_error': service.last_error, 'wechat_delivery_verified': False,
-                'last_announce': getattr(service, 'last_announce', None)}
+                'last_announce': getattr(service, 'last_announce', None),
+                'code': code, 'code_text': describe_code(code) or CODE_TEXT.get(code, ''),
+                'code_hint': hint_for_code(code) or CODE_HINT.get(code, ''),
+                'checked_at': getattr(service, 'checked_at', None)}
 
     @app.post('/api/dsh')
     async def save(req: DshSettings):
@@ -111,7 +131,7 @@ def add_routes(app):
         bot = app.state.bot
         actor = require_bound(bot)
         service = bot.dsh
-        from .dsh_discovery import discover as find, normalized
+        from .dsh_discovery import code_for_message, describe_code, discover as find, hint_for_code, normalized
         reported = (req.base_url or '').strip()
         try:
             # 一个请求只做一轮：probe 与 discovery 合计不超过20秒，超时按失败处理。
@@ -170,10 +190,19 @@ def add_routes(app):
     async def probe():
         bot = app.state.bot
         require_bound(bot)
+        from .dsh_discovery import CODE_HINT, code_for_message, describe_code, hint_for_code
         try:
-            return await bot.dsh.probe()
+            result = await bot.dsh.probe()
+            # 探测成功也要记一次心跳：界面靠这个时间戳区分「刚验过」和「上次的旧结论」。
+            bot.dsh.checked_at = time.time()
+            return result
         except DshError as exc:
-            body = {'success': False, 'message': str(exc), 'detail': error_detail(exc)}
+            bot.dsh.checked_at = time.time()
+            # 码只加字段，不动 message：既有测试与上报文案都依赖那句原文。
+            code = code_for_message(exc) or 'dsh_unreachable'
+            body = {'success': False, 'message': str(exc), 'detail': error_detail(exc),
+                    'code': code, 'code_text': describe_code(code), 'code_hint': hint_for_code(code),
+                    'checked_at': bot.dsh.checked_at}
             found = await discovery_hint(bot)
             if found:
                 body.update(found)
@@ -193,7 +222,10 @@ def add_routes(app):
             return saved|{'enabled':True,'message':'DSH对话引擎已保存并启用；微信发送端的控件状态仍单独检查。'}
         except DshError as exc:
             found = await discovery_hint(bot)
-            return {'success':False,'message':str(exc)} | (found or {})
+            # 失败也带码与两句中文，界面不必再从异常文本里猜是哪一类故障。
+            code = code_for_message(exc) or 'dsh_unreachable'
+            return {'success':False,'message':str(exc),'code':code,
+                    'code_text':describe_code(code),'code_hint':hint_for_code(code)} | (found or {})
 
     @app.post('/api/dsh/install-preset')
     async def install():

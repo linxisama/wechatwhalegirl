@@ -500,6 +500,7 @@ def status(runtime=None, *, patch=None, root=None, connector=None, python=None):
             {'key': 'watch', 'label': '开启自动守护', 'method': 'POST', 'path': '/api/dsh/connect/watch',
              'body': {'enabled': True}},
         ]
+        code = _issue_code(issues, state)
         return {'state': state,
                 'base_url': base_url(runtime),
                 'connector': {'path': str(script), 'version': version, 'sha256': digest},
@@ -511,10 +512,50 @@ def status(runtime=None, *, patch=None, root=None, connector=None, python=None):
                 'patch': str(patch_path),
                 'port_url': port_url,
                 'issues': issues,
+                'code': code,
+                'code_text': _code_text(code),
+                'code_hint': _code_hint(code),
                 'message': _status_message(state)}
     except Exception as error:
         return _status_failure(patch_file(patch), 'internal',
                                '读取 DSH 连接状态失败（' + type(error).__name__ + '），请重试')
+
+
+# issue → 连接码：面板只认码，不再从 issues 字符串里猜。顺序即优先级。
+_ISSUE_CODES = (
+    ('patch_unreadable', 'dsh_config_missing'),
+    ('patch_missing', 'dsh_config_missing'),
+    ('connector_foreign', 'dsh_setup_incomplete'),
+    ('connector_outdated', 'dsh_setup_incomplete'),
+    ('connector_missing', 'dsh_setup_incomplete'),
+    ('block_unmanaged', 'dsh_setup_incomplete'),
+    ('block_missing', 'dsh_setup_incomplete'),
+    ('default_missing', 'dsh_setup_incomplete'),
+)
+
+
+def _issue_code(issues, state):
+    """按优先级取第一个命中；都就绪时给 dsh_ok。码表在 dsh_discovery 里，延迟导入保持本模块轻量。"""
+    if state == 'ready':
+        return 'dsh_ok'
+    for issue, code in _ISSUE_CODES:
+        if issue in issues:
+            return code
+    return ''
+
+
+def _code_text(code):
+    if not code:
+        return ''
+    from .dsh_discovery import describe_code
+    return describe_code(code)
+
+
+def _code_hint(code):
+    if not code:
+        return ''
+    from .dsh_discovery import hint_for_code
+    return hint_for_code(code)
 
 
 def _status_message(state):
@@ -542,7 +583,10 @@ def _hint(state, issues, patch_path):
 
 
 def _status_failure(patch_path, reason, message):
+    # 读配置失败与读状态炸了不是一回事：前者让用户修文件，后者让用户重试。
+    code = 'dsh_config_missing' if reason == 'patch_unreadable' else 'dsh_state_unreadable'
     return {'state': 'error', 'base_url': DEFAULT_BASE_URL,
+            'code': code, 'code_text': _code_text(code), 'code_hint': _code_hint(code),
             'connector': {'path': '', 'version': '', 'sha256': ''},
             'preset': '', 'default_preset_set': False, 'last_announce_at': None,
             'hint': '请检查控制台日志后重试', 'actions': [], 'patch': str(patch_path),
@@ -569,22 +613,42 @@ def watch(runtime, interval=30.0, stop_event=None, *, status_fn=None, backoff=(1
         cap = base
     stop = stop_event if stop_event is not None else threading.Event()
     probe = status_fn if callable(status_fn) else (lambda: status(runtime))
-    cycles, errors, last, delay = 0, 0, None, base
+    cycles, errors, unhealthy, last, delay = 0, 0, 0, None, base
     while not stop.is_set():
         try:
             value = probe()
             cycles += 1
             if isinstance(value, dict):
                 last = value
-            delay = base
-            stop.wait(step)
+            healthy = _watch_healthy(last)
+            if healthy:
+                delay = base
+                stop.wait(step)
+            else:
+                # 「连不上」不是异常：状态函数照常返回 dict，过去这里直接按正常节奏空转，
+                # 于是 DSH 关着的时候守护仍然每 30 秒刷一遍日志和磁盘。按同一套退避慢下来。
+                unhealthy += 1
+                stop.wait(min(delay, cap))
+                delay = min(delay * 2, cap)
         except Exception:
             # 读状态本身炸了：不退出守护，只按退避慢下来，避免刷屏和打爆磁盘。
             errors += 1
             stop.wait(min(delay, cap))
             delay = min(delay * 2, cap)
-    return {'cycles': cycles, 'errors': errors, 'interval': step, 'stopped': True,
+    return {'cycles': cycles, 'errors': errors, 'unhealthy': unhealthy, 'interval': step,
+            'stopped': True, 'last_delay': delay, 'cap': cap,
             'last_state': (last or {}).get('state') if isinstance(last, dict) else None}
+
+
+# 这些状态说明链路是通的；其余（error/pending/未检测/没码）都要退避，别把「没连上」当正常。
+_HEALTHY_STATES = frozenset({'ready', 'ok'})
+
+
+def _watch_healthy(value):
+    """只有明确的就绪状态才算健康：读不到状态时按不健康处理，宁可慢一点。"""
+    if not isinstance(value, dict):
+        return False
+    return str(value.get('state') or '') in _HEALTHY_STATES
 
 
 def connect_instructions():
