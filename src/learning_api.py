@@ -25,7 +25,7 @@ def add_routes(app):
         rooms=bot.conversations.rooms(bot)
         if target:
             room(kind,target);value=bot.learning.view(bot,kind,target)
-        else:value=dict(window_count=0,window_limit=1000,items=[])
+        else:value=bot.learning.empty_view(bot)
         return dict(success=True,account=bot.account(),rooms=rooms,**value)
 
     @app.get('/api/dialogue/learning/overview')

@@ -67,17 +67,26 @@ class LocalLearning:
         if 'persona' not in {row[1] for row in db.execute('PRAGMA table_info(learning_items)')}:
             db.execute('ALTER TABLE learning_items ADD COLUMN persona TEXT')
             db.execute('UPDATE learning_items SET persona=? WHERE persona IS NULL',(DEFAULT_PERSONA,))
+        # 按人设的索引必须建在补列**之后**：老库的 learning_items 没有 persona 列，
+        # 把它写进上面的 executescript 会让整段建表在升级机上直接失败。
+        db.execute('CREATE INDEX IF NOT EXISTS learning_persona ON learning_items'
+                   '(mode,account,kind,target,persona,updated)')
 
     @staticmethod
     def _settings(runtime):
         return getattr(getattr(runtime,'plugins',None),'_plugins',{}).get('conversation_memory')
+
+    @staticmethod
+    def _persona(runtime):
+        """当前生效人设；取不到就退默认人设（老库里的无标记行也归默认人设）。"""
+        return getattr(getattr(runtime,'style',None),'active_name',None) or DEFAULT_PERSONA
 
     def _visibility(self,runtime,include_default=False):
         settings=self._settings(runtime)
         if settings is None or settings.get('personaIsolation',True):
             # 人设隔离必须严格：把别人设的条目混进来，等于把 A 的偏好当成 B 的记忆。
             # 切换人设后页面看起来空是"确实还没学"，由界面提示去补学，不能靠放宽隔离来填。
-            return ' AND persona=?',(runtime.style.active_name,)
+            return ' AND persona=?',(self._persona(runtime),)
         return '',()
 
     @staticmethod
@@ -87,6 +96,10 @@ class LocalLearning:
         scope=self.scope(runtime,message['kind'],str(message['target']))
         mid=str(message['id']);subject=person_of(message)
         text=strip_sender_prefix(message.get('text'))
+        # 人设在这条消息进门时**一次取定**，整轮（含 _extract 与淘汰）都用它：
+        # 处理期间用户切了人设，这条消息也不能改记到新人设头上，否则写进去的 persona
+        # 和随后 view/recall 用的人设对不上，条目会"写了却看不见"。
+        persona=message.get('_learning_persona') or self._persona(runtime)
         if message.get('_robot_admin') or message.get('_admin_session') or text.startswith(('管理员','/')):
             return
         oldest=self.db.execute('SELECT min(created),count(*) FROM learning_messages WHERE mode=? AND account=? AND kind=? AND target=?',scope).fetchone()
@@ -96,7 +109,7 @@ class LocalLearning:
         if changed and subject and not message.get('_history_self') and subject!=getattr(getattr(runtime,'bridge',None),'self_id',''):
             settings=self._settings(runtime)
             if settings is None or settings.enabled:
-                self._extract(scope,mid,subject,text,message.get('_learning_persona') or runtime.style.active_name,
+                self._extract(scope,mid,subject,text,persona,
                               settings is None or settings.get('autoRemember',True))
         # 同时按时间与消息ID排序，导入乱序旧消息不能挤掉较新的上下文。
         self.db.execute('DELETE FROM learning_messages WHERE rowid IN (SELECT rowid FROM learning_messages '
@@ -127,9 +140,10 @@ class LocalLearning:
         self.db.execute('INSERT INTO learning_items VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?) '
             'ON CONFLICT(id) DO UPDATE SET hits=excluded.hits,evidence=excluded.evidence,status=excluded.status,updated=excluded.updated',
             (identity,)+scope+(subject,category,text,status,hits,json.dumps(evidence),now,now,persona))
-        # 先淘汰未确认候选，保留有用条目；每个会话最多200条学习结果。
-        self.db.execute('DELETE FROM learning_items WHERE id IN (SELECT id FROM learning_items WHERE mode=? AND account=? AND kind=? AND target=? '
-            "ORDER BY (status='approved') DESC,updated DESC,id DESC LIMIT -1 OFFSET 200)",scope)
+        # 先淘汰未确认候选，保留有用条目；每个会话**每个人设**最多200条学习结果。
+        # 不带 persona 时，B 人设学一条就会把 A 人设挤掉一条 —— 学习区域根本没有独立。
+        self.db.execute('DELETE FROM learning_items WHERE id IN (SELECT id FROM learning_items WHERE mode=? AND account=? AND kind=? AND target=? AND persona=? '
+            "ORDER BY (status='approved') DESC,updated DESC,id DESC LIMIT -1 OFFSET 200)",scope+(persona,))
 
     def rebuild(self,runtime,kind,target,limit=None):
         """从本会话最近记录提炼；``limit`` 让调用方按块处理，别一次占住事件循环。"""
@@ -156,9 +170,12 @@ class LocalLearning:
         for room in rooms[:limit_rooms]:
             scope = self.scope(runtime, room['kind'], room['target'])
             try:
+                clause, params = self._visibility(runtime)
+                # 按**当前人设**数：别人设学过不算这个会话已补学，否则切到新人设后
+                # 它永远进不了补学名单，新人设的学习区域就一直是空的。
                 learned = self.db.execute(
-                    'SELECT count(*) FROM learning_items WHERE mode=? AND account=? AND kind=? AND target=?',
-                    scope).fetchone()[0]
+                    'SELECT count(*) FROM learning_items WHERE mode=? AND account=? AND kind=? AND target=?'
+                    + clause, scope + params).fetchone()[0]
                 if learned:
                     continue
             except Exception:
@@ -173,9 +190,10 @@ class LocalLearning:
         """补一个会话；出错就当这次没补，绝不影响收发。"""
         try:
             scope = self.scope(runtime, kind, target)
+            clause, params = self._visibility(runtime)
             learned = self.db.execute(
-                'SELECT count(*) FROM learning_items WHERE mode=? AND account=? AND kind=? AND target=?',
-                scope).fetchone()[0]
+                'SELECT count(*) FROM learning_items WHERE mode=? AND account=? AND kind=? AND target=?'
+                + clause, scope + params).fetchone()[0]
             window = self.db.execute(
                 'SELECT count(*) FROM learning_messages WHERE mode=? AND account=? AND kind=? AND target=?',
                 scope).fetchone()[0]
@@ -227,9 +245,10 @@ class LocalLearning:
             kind, target = room['kind'], room['target']
             scope = self.scope(runtime, kind, target)
             try:
+                clause, params = self._visibility(runtime)
                 learned = self.db.execute(
-                    'SELECT count(*) FROM learning_items WHERE mode=? AND account=? AND kind=? AND target=?',
-                    scope).fetchone()[0]
+                    'SELECT count(*) FROM learning_items WHERE mode=? AND account=? AND kind=? AND target=?'
+                    + clause, scope + params).fetchone()[0]
                 if learned:
                     continue
                 window = self.db.execute(
@@ -259,25 +278,42 @@ class LocalLearning:
             try:
                 window = self.db.execute('SELECT count(*) FROM learning_messages WHERE mode=? AND account=? '
                                          'AND kind=? AND target=?', scope).fetchone()[0]
-                rows = self.db.execute('SELECT category,status,count(*) FROM learning_items WHERE mode=? '
-                                       'AND account=? AND kind=? AND target=? GROUP BY category,status',
+                rows = self.db.execute('SELECT persona,category,status,count(*) FROM learning_items WHERE mode=? '
+                                       'AND account=? AND kind=? AND target=? GROUP BY persona,category,status',
                                        scope).fetchall()
             except Exception:
                 continue
+            persona = self._persona(runtime)
+            # 关掉人设隔离时 view 是全量，总览也必须按全量算，否则页面会出现
+            # "列表里看得见、统计里 0 条"这种自相矛盾的数字。
+            clause, _ = self._visibility(runtime)
+            isolated = bool(clause)
             counts = {'fact': 0, 'expression': 0, 'approved': 0, 'candidate': 0}
-            for category, status, number in rows:
+            others = {}
+            for owner, category, status, number in rows:
+                owner = owner or DEFAULT_PERSONA
+                if isolated and owner != persona:
+                    # 别人设的条目只报**条数**，不报内容：界面要能说"还有 M 条不可见"，
+                    # 但不能把别人设学到的东西漏出来，也不能把它们算进本人设的统计。
+                    others[owner] = others.get(owner, 0) + number
+                    continue
                 counts[category] = counts.get(category, 0) + number
                 counts[status] = counts.get(status, 0) + number
             total = counts['fact'] + counts['expression']
+            other_total = sum(others.values())
             archive = int(room['count'] or 0)
             rooms.append(dict(kind=kind, target=target, archive=archive, window=window,
                               facts=counts['fact'], expressions=counts['expression'],
                               approved=counts['approved'], candidate=counts['candidate'],
+                              persona=persona, persona_items=total, other_persona_items=other_total,
+                              personas=dict(sorted(others.items(), key=lambda row: -row[1])),
+                              isolation=isolated,
                               # 归档里有原文却一条都没提炼出来时，页面要给出可点的下一步，不能只显示 0。
                               pending=0 if total else archive,
                               hint=('' if total else
                                     (f'有 {archive} 条聊天记录还没提炼，点“一键学习”' if archive
-                                     else '这个会话还没有聊天记录'))))
+                                     else '这个会话还没有聊天记录')
+                                    + (f'；另有 {other_total} 条属于其他人设，当前人设看不到' if other_total else ''))))
         return rooms
 
     def bulk(self, runtime, action, kind=None, target=None, limit_rooms=30):
@@ -293,33 +329,52 @@ class LocalLearning:
                 if action == 'learn-all':
                     learned += self.rebuild(runtime, room['kind'], room['target'])
                 else:
+                    # 批量批准也必须守人设：不限定 persona 时，B 人设点一下就把 A 人设的候选
+                    # 全批成 approved，等于替别人设做了决定。
+                    clause, params = self._visibility(runtime)
                     approved += self.db.execute(
                         "UPDATE learning_items SET status='approved',updated=? WHERE mode=? AND account=? "
-                        "AND kind=? AND target=? AND category='expression' AND status='candidate'",
-                        (time.time(),) + scope).rowcount
+                        "AND kind=? AND target=? AND category='expression' AND status='candidate'" + clause,
+                        (time.time(),) + scope + params).rowcount
             except Exception:
                 continue
         return dict(rooms=len(rooms), learned=learned, approved=approved)
+
+    def empty_view(self,runtime):
+        """没有选中会话时的空视图：字段与 view 一致，界面不用为两种情况写两套。"""
+        clause,_=self._visibility(runtime)
+        return dict(window_count=0,window_limit=self.WINDOW,items=[],persona=self._persona(runtime),
+                    persona_items=0,other_persona_items=0,isolation=bool(clause))
 
     def view(self,runtime,kind,target):
         scope=self.scope(runtime,kind,target)
         fields=('id','subject','category','content','status','hits','evidence','created','updated','persona')
         clause,params=self._visibility(runtime)
         rows=self.db.execute('SELECT '+','.join(fields)+' FROM learning_items WHERE mode=? AND account=? AND kind=? AND target=?'+clause+' ORDER BY updated DESC',scope+params).fetchall()
+        # 本人设学到多少、别人设共有多少（不可见）：界面要能说清楚"为什么这里是空的"，
+        # 而不是让用户以为学习功能坏了。别人设的条数只报数量，绝不带内容。
+        persona=self._persona(runtime)
+        other=self.db.execute('SELECT count(*) FROM learning_items WHERE mode=? AND account=? AND kind=? '
+                              'AND target=? AND (persona IS NULL OR persona<>?)',scope+(persona,)).fetchone()[0]
         items=[dict(zip(fields,row)) for row in rows]
         for item in items:
             item['evidence']=json.loads(item['evidence'])
             name=self.db.execute('SELECT name FROM learning_messages WHERE mode=? AND account=? AND kind=? AND target=? AND subject=? ORDER BY created DESC LIMIT 1',scope+(item['subject'],)).fetchone()
             item['subject_name']=name[0] if name and name[0] else item['subject']
         count=self.db.execute('SELECT count(*) FROM learning_messages WHERE mode=? AND account=? AND kind=? AND target=?',scope).fetchone()[0]
-        return dict(window_count=count,window_limit=self.WINDOW,items=items)
+        # 关闭人设隔离时 view 是全量，别人设的条目已经混在 items 里，再报"不可见"就自相矛盾。
+        visible = bool(clause)
+        return dict(window_count=count,window_limit=self.WINDOW,items=items,persona=persona,
+                    persona_items=len(items) if visible else None,
+                    other_persona_items=other if visible else 0,
+                    isolation=visible)
 
     def change(self,runtime,kind,target,identity,action):
         scope=self.scope(runtime,kind,target)
         if action not in ('approve','reject','delete'):raise ValueError('请选择批准、拒绝或删除')
         clause,params=self._visibility(runtime)
         if not self.db.execute('SELECT 1 FROM learning_items WHERE id=? AND mode=? AND account=? AND kind=? AND target=?'+clause,(identity,)+scope+params).fetchone():
-            raise ValueError('学习条目不存在或属于其他会话')
+            raise ValueError('学习条目不存在，或属于其他会话/其他人设')
         if action=='delete':self.db.execute('DELETE FROM learning_items WHERE id=?',(identity,))
         else:self.db.execute('UPDATE learning_items SET status=?,updated=? WHERE id=?',('approved' if action=='approve' else 'rejected',time.time(),identity))
 
@@ -345,8 +400,13 @@ class LocalLearning:
     def clear(self,runtime,kind,target,mid=None):
         scope=self.scope(runtime,kind,target)
         if mid is None:
-            for table in ('learning_messages','learning_items'):
-                self.db.execute('DELETE FROM '+table+' WHERE mode=? AND account=? AND kind=? AND target=?',scope)
+            # 活动窗口没有 persona 列（原文本来就不分人设），照旧整段清；
+            # **学习条目必须按人设删**：删一个会话的记录是用户对这一个会话的动作，
+            # 不能顺手把其他人设学到的条目一起删光 —— 那正是"独立学习区域"被破坏的地方。
+            self.db.execute('DELETE FROM learning_messages WHERE mode=? AND account=? AND kind=? AND target=?',scope)
+            clause,params=self._visibility(runtime)
+            self.db.execute('DELETE FROM learning_items WHERE mode=? AND account=? AND kind=? AND target=?'+clause,
+                            scope+params)
         else:
             self.db.execute('DELETE FROM learning_messages WHERE mode=? AND account=? AND kind=? AND target=? AND mid=?',scope+(mid,))
             # 删除证据后不能让对应学习条目残留并继续引用。

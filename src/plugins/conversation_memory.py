@@ -6,6 +6,38 @@ from ..style_manager import DEFAULT_PERSONA
 from ..text_matching import configured_terms,normalized_text as normalize_text
 
 
+# 手动记忆进提示词前的三道上限。persona_notes 每人设最多 100 条、每条最长 500 字，
+# 不设限就等于允许把 5 万字塞进 extra_system：提示词被记忆挤爆，回复质量反而下降。
+MANUAL_ITEMS = 12
+MANUAL_ITEM_CHARS = 60
+MANUAL_TOTAL_CHARS = 900
+
+
+def manual_budget(items, max_items=None, item_chars=None, total_chars=None):
+    """按最近使用优先截断手动记忆：条数、单条长度、总长度三道闸。
+
+    persona_notes 没有使用时间列，notes() 按 rowid 升序返回，越靠后越新，
+    所以从尾部往前取就是最近添加/修改的优先。输出仍按原顺序，
+    界面看到的顺序与提示词里的一致，不会因为截断而错位。
+    """
+    limit_items = max(1, int(max_items or MANUAL_ITEMS))
+    limit_item = max(1, int(item_chars or MANUAL_ITEM_CHARS))
+    limit_total = max(1, int(total_chars or MANUAL_TOTAL_CHARS))
+    kept, used = [], 0
+    for text in reversed([str(value or '').strip() for value in items]):
+        if not text:
+            continue
+        if len(text) > limit_item:
+            # 截断而不是丢弃：长条目往往前半句就是要点，整条丢掉反而更亏。
+            text = text[:limit_item - 1] + '…'
+        if len(kept) >= limit_items or used + len(text) > limit_total:
+            break
+        kept.append(text)
+        used += len(text)
+    kept.reverse()
+    return kept
+
+
 class ConversationMemory(PluginBase):
     META = PluginMeta(id='conversation_memory', name='长期记忆与群友档案', category='utility',
         description='记住个人事实与偏好，按会话和发送者隔离。/记住 内容、/记忆 关键词、/忘记 关键词、/我的印象、/群友。自动观察需两次独立消息复证，不能凭模型猜测写入。',
@@ -21,6 +53,9 @@ class ConversationMemory(PluginBase):
             'recallArchive':FieldSchema(type='bool',label='从本地聊天记录检索相关旧对话',description='自动在当前群/私聊的持久化记录中找相关原文；不跨群，不额外调用模型，不删除历史。'),
             'archiveRecallLimit':FieldSchema(type='int',label='每轮最多引用相关旧记录',min=1,max=10),
             'localLearning':FieldSchema(type='bool',label='引用本地已确认学习结果',description='同一会话与发送者的明确事实需两条独立证据，表达候选须在学习库批准。不修改人设、不额外调用模型。'),
+            'manualItems':FieldSchema(type='int',label='每轮最多引用的手动记忆条数',description='默认 12。超出时保留最近修改的那几条。',min=1,max=50),
+            'manualItemChars':FieldSchema(type='int',label='单条手动记忆最多引用字数',description='默认 60，超出部分以省略号截断。',min=10,max=300),
+            'manualTotalChars':FieldSchema(type='int',label='手动记忆引用总字数上限',description='默认 900，超出时停止追加后面的条目。',min=100,max=4000),
         }, default_settings={'enabled':True, 'autoRemember':True, 'recallLimit':5, 'maxEntries':500,
                              'personaIsolation':True,'crossChatPreferences':False,'privateToGroup':False,
                              'recallArchive':True,'archiveRecallLimit':3,
@@ -205,7 +240,11 @@ class ConversationMemory(PluginBase):
         if hasattr(runtime,'style'):
             from ..dialogue_management import notes as manual_notes
             try:
-                manual=[v['content'] for v in manual_notes(runtime) if v['enabled']]
+                # 三道上限（条数/单条/总长）：手动记忆会整段进 extra_system，不设限就会挤爆提示词。
+                manual=manual_budget([v['content'] for v in manual_notes(runtime) if v['enabled']],
+                                     self.get('manualItems',MANUAL_ITEMS),
+                                     self.get('manualItemChars',MANUAL_ITEM_CHARS),
+                                     self.get('manualTotalChars',MANUAL_TOTAL_CHARS))
             except Exception:
                 manual=[]
         # 与上面三处插入一一对应的原文清单：手动记忆 / 已确认长期记忆 / 已确认学习结果。
