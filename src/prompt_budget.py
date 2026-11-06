@@ -13,6 +13,8 @@
 log_line() 写运行日志，因此“未超限时逐字不变”可以用测试钉死。
 """
 
+import re
+
 # 块的固定顺序＝拼进提示词的顺序；改顺序会改变与模型的相处方式，不要随手动
 PART_ORDER = ("persona", "continuity", "plugins", "rules", "image")
 
@@ -34,6 +36,21 @@ DEFAULT_PART_CAPS = {
 
 # 总预算（字）：6000 与历史消息预算 contextChars 同档，两段加起来不顶爆常见模型的上下文
 DEFAULT_MAX_CHARS = 6000
+
+# 表情包段落专用上限（字）。用户点名的缺陷：人设先占 3000 字，剩下的 plugins 额度
+# 再被一堆表情包描述挤掉，最终只有 800 字到得了模型，模型只看得到最新五六个表情。
+# 所以给这段文案一个**独立**硬预算：不跟联网资讯/手动记忆抢同一个 plugins 额度，
+# 超了就在段落内部按相关度先砍最不相关的条目，而不是整段被宿主丢块。
+STICKER_SECTION_CAP = 800
+# 单条描述上限（字，含省略号）：原 80 字 × 5 条就 600 字，800 的预算照样会爆
+STICKER_MEANING_CHARS = 40
+# 一轮最多给模型看几条说明：真正可能被选中的只有相关度最高的那几条
+STICKER_MAX_ITEMS = 3
+# 段落砍掉几条记在这句话里。为什么靠文案回读而不是加参数：段落由 image_library 插件
+# 生成，插件只能通过 extra_system 交出结果（dispatch 只转发固定的几个键），
+# 所以"砍了几条"必须跟着文案一起走，宿主才说得出来。
+STICKER_CUT_NOTE = "（表情包说明超预算，已按相关度省略 {count} 条）"
+_STICKER_CUT = re.compile(r"已按相关度省略 (\d+) 条")
 
 TRUNCATE_NOTE = "…（{name} 超长已截断 {count} 字）"
 HARD_CUT_NOTE = "（本轮注入超预算，已硬截断）"
@@ -94,12 +111,47 @@ def max_chars(config=None):
     return limit or DEFAULT_MAX_CHARS
 
 
+def sticker_cap(config=None):
+    """表情包段落专用上限：prompt_budget.stickerCap 覆盖，非法值退回默认。"""
+    limit = _positive_int(_config_get(config, "prompt_budget.stickerCap", None))
+    return limit or STICKER_SECTION_CAP
+
+
+def sticker_meaning_chars(config=None):
+    """单条表情描述上限：prompt_budget.stickerMeaningChars 覆盖，非法值退回默认。"""
+    limit = _positive_int(_config_get(config, "prompt_budget.stickerMeaningChars", None))
+    return limit or STICKER_MEANING_CHARS
+
+
+def sticker_max_items(config=None):
+    """一轮最多几条表情说明：prompt_budget.stickerMaxItems 覆盖，非法值退回默认。"""
+    limit = _positive_int(_config_get(config, "prompt_budget.stickerMaxItems", None))
+    return limit or STICKER_MAX_ITEMS
+
+
+def clip_note(text, limit):
+    """单行说明截断：超限补省略号，且省略号算在上限里（调用方给的数就是最终上限）。"""
+    value = str(text or "").strip()
+    limit = _positive_int(limit)
+    if not limit or len(value) <= limit:
+        return value
+    return value[:max(0, limit - 1)] + "…"
+
+
+def sticker_cut_count(text):
+    """从表情包段落文案里读回它自己报告的省略条数（0 表示没砍）。"""
+    found = _STICKER_CUT.search(str(text or ""))
+    return int(found.group(1)) if found else 0
+
+
 class _Rendered:
     """一次渲染的完整结果；宿主只需要 text 与那行日志。"""
 
-    __slots__ = ("text", "total", "sizes", "dropped", "truncated", "hard_cut", "plugin_parts")
+    __slots__ = ("text", "total", "sizes", "dropped", "truncated", "hard_cut",
+                 "plugin_parts", "sticker_cut")
 
-    def __init__(self, text, total, sizes, dropped, truncated, hard_cut, plugin_parts):
+    def __init__(self, text, total, sizes, dropped, truncated, hard_cut, plugin_parts,
+                 sticker_cut=0):
         self.text = text
         self.total = total
         self.sizes = sizes
@@ -107,6 +159,7 @@ class _Rendered:
         self.truncated = truncated
         self.hard_cut = hard_cut
         self.plugin_parts = plugin_parts
+        self.sticker_cut = sticker_cut
 
 
 class PromptPlan:
@@ -164,8 +217,13 @@ class PromptPlan:
         if hard_cut:
             # 全丢完还超预算，说明单块上限本身配大了；这里只保证不再超，被砍掉的部分靠标记说明
             text = text[:max(0, limit - len(HARD_CUT_NOTE))] + HARD_CUT_NOTE
+        # 表情包段落自己报告砍了几条；宿主据此在日志里说清楚，不用猜
+        sticker_cut = 0
+        for pid, part in self._parts:
+            if pid == "image_library":
+                sticker_cut += sticker_cut_count(part)
         return _Rendered(text, len(text), sizes, dropped, truncated, hard_cut,
-                         tuple((pid, len(part)) for pid, part in self._parts))
+                         tuple((pid, len(part)) for pid, part in self._parts), sticker_cut)
 
     @property
     def text(self):
@@ -191,6 +249,11 @@ class PromptPlan:
     def hard_cut(self):
         return self._rendered.hard_cut
 
+    @property
+    def sticker_cut(self):
+        """本轮表情包段落按相关度砍掉的条数（0 = 没砍）。"""
+        return self._rendered.sticker_cut
+
     def log_line(self):
         """一行可诊断的注入构成：谁占了多少、丢了谁、哪个插件贡献多少。
 
@@ -201,6 +264,8 @@ class PromptPlan:
         line = f"注入构成：总 {rendered.total} 字（{parts}）"
         if rendered.dropped:
             line += "；丢块：" + ",".join(rendered.dropped)
+        if rendered.sticker_cut:
+            line += f"；表情包段落砍掉 {rendered.sticker_cut} 条"
         if rendered.plugin_parts:
             line += "；插件归因：" + ",".join(f"{pid}={size}" for pid, size in rendered.plugin_parts)
         return line

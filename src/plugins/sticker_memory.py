@@ -20,6 +20,7 @@ import time
 from typing import Optional
 
 from . import PluginBase, PluginMeta, FieldSchema
+from ..prompt_budget import clip_note, sticker_max_items, sticker_meaning_chars
 
 # 存档/渲染里的媒体占位形式（见契约第 7 节）：[表情] [图片] [语音] [文件:名字]
 _STICKER_TAG = re.compile(r'^\[(动画表情|表情|动图|GIF|贴纸)')
@@ -154,16 +155,30 @@ class StickerMemoryCache:
                               cross_chat_days, now) >= max(0.0, float(threshold))
 
     def known_notes(self, digests, chat_key: str, same_chat_hours: float = 24.0,
-                    cross_chat_days: float = 7.0, now: Optional[float] = None) -> list:
-        """给出可直接写进上下文的"已知表情包"提示行。"""
+                    cross_chat_days: float = 7.0, now: Optional[float] = None,
+                    meaning_chars: Optional[int] = None,
+                    max_items: Optional[int] = None) -> list:
+        """给出可直接写进上下文的"已知表情包"提示行。
+
+        每条 meaning 与总条数都有上限（默认 40 字 / 3 条，可用 prompt_budget.
+        stickerMeaningChars / stickerMaxItems 覆盖）。为什么必须在这里封顶：记下来的
+        说明最长 3000 字，这条路径一旦接进提示词，20 张图就能把整段预算吃穿——
+        与本轮表情包段落 800 字硬预算同源，所以两边用同一套上限。
+        """
+        limit_chars = sticker_meaning_chars() if meaning_chars is None else meaning_chars
+        limit_items = sticker_max_items() if max_items is None else max_items
         notes = []
         for digest in digests or []:
             if not digest:
                 continue
             entry = self.lookup(digest)
             if entry and self.is_fresh(digest, chat_key, same_chat_hours, cross_chat_days, now):
-                notes.append(f"[已知表情包：{entry['meaning']}]")
+                meaning = clip_note(entry.get('meaning'), limit_chars)
+                if meaning:
+                    notes.append(f"[已知表情包：{meaning}]")
                 self.touch(digest, chat_key, now)
+                if len(notes) >= limit_items:
+                    break
         return notes
 
     def export(self) -> dict:
@@ -280,12 +295,18 @@ class StickerMemory(PluginBase):
         self.persist()
         return True
 
-    def notes_for(self, digests, chat_key: str) -> list:
-        """给这批图片生成"已知表情包"提示（同时刷新使用时间）。"""
+    def notes_for(self, digests, chat_key: str, config=None) -> list:
+        """给这批图片生成"已知表情包"提示（同时刷新使用时间）。
+
+        ``config`` 是宿主的配置对象；传了就认 prompt_budget.stickerMeaningChars /
+        stickerMaxItems 两个覆盖值，不传则用默认 40 字 / 3 条。
+        """
         return self.cache().known_notes(
             digests, chat_key,
             float(self.get("recheckSameChatHours", 24.0) or 0),
             float(self.get("recheckCrossChatDays", 7.0) or 0),
+            meaning_chars=sticker_meaning_chars(config),
+            max_items=sticker_max_items(config),
         )
 
     def should_skip_look(self, digests, chat_key: str) -> bool:
