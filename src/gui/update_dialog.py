@@ -9,12 +9,16 @@ from typing import Any
 
 try:  # 项目当前实际运行在 PyQt6 上，发布目标优先 PySide6。
     from PySide6.QtCore import Qt, QTimer
-    from PySide6.QtWidgets import (QDialog, QHBoxLayout, QLabel, QProgressBar,
-                                   QPushButton, QTextEdit, QVBoxLayout)
+    from PySide6.QtWidgets import (QCheckBox, QDialog, QFormLayout, QHBoxLayout,
+                                   QLabel, QLineEdit, QProgressBar, QPushButton,
+                                   QSpinBox, QTextEdit, QToolButton, QVBoxLayout,
+                                   QWidget)
 except ImportError:  # pragma: no cover - 由实际安装的 Qt 绑定决定
     from PyQt6.QtCore import Qt, QTimer
-    from PyQt6.QtWidgets import (QDialog, QHBoxLayout, QLabel, QProgressBar,
-                                 QPushButton, QTextEdit, QVBoxLayout)
+    from PyQt6.QtWidgets import (QCheckBox, QDialog, QFormLayout, QHBoxLayout,
+                                 QLabel, QLineEdit, QProgressBar, QPushButton,
+                                 QSpinBox, QTextEdit, QToolButton, QVBoxLayout,
+                                 QWidget)
 
 _STATE_TEXT = {
     'idle': '尚未检查更新',
@@ -75,6 +79,52 @@ class UpdateDialog(QDialog):
         self.progress.setValue(0)
         self.progress.setTextVisible(True)
         layout.addWidget(self.progress)
+
+        # 高级设置：默认折叠。更新源/间隔是少数人才改的东西，摊开在首屏只会挤掉更新说明。
+        self.advanced_toggle = QToolButton()
+        self.advanced_toggle.setText('高级设置')
+        self.advanced_toggle.setCheckable(True)
+        self.advanced_toggle.setChecked(False)
+        self.advanced_toggle.setArrowType(Qt.ArrowType.RightArrow)
+        self.advanced_toggle.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self.advanced_toggle.setAutoRaise(True)
+        self.advanced_toggle.setStyleSheet('QToolButton { color:#18334A; font-weight:600; }')
+        self.advanced_toggle.toggled.connect(self._toggle_advanced)
+        layout.addWidget(self.advanced_toggle)
+
+        self.advanced_panel = QWidget()
+        form = QFormLayout(self.advanced_panel)
+        form.setContentsMargins(0, 0, 0, 0)
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self.feed_edit = QLineEdit()
+        self.feed_edit.setPlaceholderText('更新源地址，留空表示不检查更新')
+        self.auto_check_box = QCheckBox('启动后自动检查更新')
+        self.auto_download_box = QCheckBox('发现新版本后自动下载')
+        self.interval_spin = QSpinBox()
+        self.interval_spin.setRange(1, 8760)  # 1 小时 ~ 一年
+        self.interval_spin.setSuffix(' 小时')
+        self.save_settings_button = QPushButton('保存设置')
+        self.save_settings_button.clicked.connect(self.save_settings)
+        form.addRow('更新源', self.feed_edit)
+        form.addRow('自动检查', self.auto_check_box)
+        form.addRow('自动下载', self.auto_download_box)
+        form.addRow('检查间隔', self.interval_spin)
+        form.addRow('', self.save_settings_button)
+        # 用户动过就进入草稿态，350ms 的状态轮询不会把他的输入改回去
+        self._settings_dirty = False
+        self._syncing = False
+        self.feed_edit.textEdited.connect(self._mark_settings_dirty)
+        self.auto_check_box.toggled.connect(self._mark_settings_dirty)
+        self.auto_download_box.toggled.connect(self._mark_settings_dirty)
+        self.interval_spin.valueChanged.connect(self._mark_settings_dirty)
+        self.advanced_panel.hide()
+        layout.addWidget(self.advanced_panel)
+
+        # 保存成功的提示：压在红字错误区上方，成功与失败占同一块视觉位置
+        self.settings_hint = QLabel('')
+        self.settings_hint.setStyleSheet('color:#1E8449;')
+        self.settings_hint.hide()
+        layout.addWidget(self.settings_hint)
 
         self.error_label = QLabel('')
         self.error_label.setWordWrap(True)
@@ -169,6 +219,72 @@ class UpdateDialog(QDialog):
         self.skip_button.setEnabled(available)
         self.retry_button.setVisible(state == 'error' or failed)
         self.close_button.setEnabled(state != 'installing')
+        self._sync_settings(status)
+
+    # ------------------------------------------------------- 高级设置
+    def _toggle_advanced(self, expanded: bool) -> None:
+        self.advanced_panel.setVisible(bool(expanded))
+        self.advanced_toggle.setArrowType(
+            Qt.ArrowType.DownArrow if expanded else Qt.ArrowType.RightArrow)
+
+    def _mark_settings_dirty(self, *_args) -> None:
+        """控件被用户动过：此后状态轮询不再覆盖输入。"""
+        if not self._syncing:
+            self._settings_dirty = True
+
+    @staticmethod
+    def _interval_from_status(status: dict) -> int:
+        """status() 没有 interval_hours 键，只能用上次/下次检查时间反推。"""
+        try:
+            last = status.get('last_check_at')
+            nxt = status.get('next_check_at')
+            if last is None or nxt is None:
+                return 24
+            hours = int(round((float(nxt) - float(last)) / 3600.0))
+        except (TypeError, ValueError):
+            return 24
+        return max(1, min(8760, hours)) if hours > 0 else 24
+
+    def _sync_settings(self, status: dict) -> None:
+        """把服务端状态写进四个控件；用户正在编辑时（草稿态）一律不动。"""
+        if self._settings_dirty and self.advanced_toggle.isChecked():
+            return
+        if 'auto' not in status and 'feed_url' not in status:
+            return  # 不是完整状态快照（例如只有 {'ok': True}），别拿空值覆盖用户输入
+        self._syncing = True
+        try:
+            self.feed_edit.setText(str(status.get('feed_url') or ''))
+            self.auto_check_box.setChecked(bool(status.get('auto', True)))
+            self.auto_download_box.setChecked(bool(status.get('auto_download', True)))
+            self.interval_spin.setValue(self._interval_from_status(status))
+        finally:
+            self._syncing = False
+
+    def save_settings(self) -> None:
+        """保存高级设置；成功给绿字提示，失败沿用红字错误区。"""
+        self._clear_error()
+        self.settings_hint.hide()
+        method = getattr(self.service, 'configure', None)
+        if not callable(method):
+            self._show_error('当前更新服务不支持修改设置')
+            return
+        try:
+            result = method(feed_url=self.feed_edit.text().strip(),
+                            auto_check=self.auto_check_box.isChecked(),
+                            auto_download=self.auto_download_box.isChecked(),
+                            interval_hours=self.interval_spin.value())
+        except Exception:
+            self._show_error('保存设置失败，请重试')
+            return
+        if isinstance(result, dict) and result.get('ok') is False:
+            self._show_error(str(result.get('message') or '保存设置失败，请重试'))
+            return
+        self._settings_dirty = False
+        self.settings_hint.setText('设置已保存')
+        self.settings_hint.show()
+        # 只有真的拿到状态快照才回刷界面，否则空结果会把版本/说明清成占位符
+        if isinstance(result, dict) and ('state' in result or isinstance(result.get('status'), dict)):
+            self.refresh(result)
 
     # -------------------------------------------------------------- actions
     def start_download(self) -> None:

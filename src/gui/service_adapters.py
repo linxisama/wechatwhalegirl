@@ -95,12 +95,15 @@ class UpdateHttpService(_Base):
     def unskip(self):
         return self._unwrap(self._call('unskip', {'clear': True}))
 
-    def configure(self, feed_url=None, auto_check=None, interval_hours=None):
+    def configure(self, feed_url=None, auto_check=None, interval_hours=None,
+                  auto_download=None):
         body = {}
         if feed_url is not None:
             body['feed_url'] = _text(feed_url)
         if auto_check is not None:
             body['auto_check'] = bool(auto_check)
+        if auto_download is not None:
+            body['auto_download'] = bool(auto_download)
         if interval_hours is not None:
             body['interval_hours'] = int(interval_hours)
         return self._unwrap(self._call('settings', body))

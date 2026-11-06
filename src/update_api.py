@@ -124,12 +124,14 @@ def get_service(runtime: Any) -> UpdateService:
             return service
         feed_url = _config_get(runtime, 'update.feed_url', updater.DEFAULT_FEED_URL)
         auto_check = _config_get(runtime, 'update.auto_check', True)
+        auto_download = _config_get(runtime, 'update.auto_download', True)
         interval = _config_get(runtime, 'update.interval_hours', 24)
         service = UpdateService(
             _data_dir(runtime),
             _current_version(runtime),
             feed_url=str(feed_url if feed_url is not None else ''),
             auto_check=_as_bool(auto_check, True),
+            auto_download=_as_bool(auto_download, True),
             interval_hours=_as_float(interval, 24.0),
         )
         try:
@@ -245,11 +247,14 @@ def register(app: FastAPI, runtime: Any) -> None:
                 return _fail('bad_request', '请求内容不是有效的 JSON 对象')
             feed_url = body.get('feed_url', _MISSING)
             auto_check = body.get('auto_check', _MISSING)
+            auto_download = body.get('auto_download', _MISSING)
             interval = body.get('interval_hours', _MISSING)
             if feed_url is not _MISSING and not isinstance(feed_url, str):
                 return _fail('bad_request', '更新地址必须是文本')
             if auto_check is not _MISSING and not isinstance(auto_check, bool):
                 return _fail('bad_request', '自动检查开关必须是布尔值')
+            if auto_download is not _MISSING and not isinstance(auto_download, bool):
+                return _fail('bad_request', '自动下载开关必须是布尔值')
             if interval is not _MISSING:
                 try:
                     interval_value = float(interval)
@@ -260,11 +265,15 @@ def register(app: FastAPI, runtime: Any) -> None:
             else:
                 interval_value = None
             current = service()
-            status = current.configure(
-                feed_url=None if feed_url is _MISSING else str(feed_url).strip(),
-                auto_check=None if auto_check is _MISSING else auto_check,
-                interval_hours=interval_value,
-            )
+            options = {
+                'feed_url': None if feed_url is _MISSING else str(feed_url).strip(),
+                'auto_check': None if auto_check is _MISSING else auto_check,
+                'interval_hours': interval_value,
+            }
+            # 只有请求里真的带了 auto_download 才传，避免旧的服务对象不认识这个关键字。
+            if auto_download is not _MISSING:
+                options['auto_download'] = auto_download
+            status = current.configure(**options)
             if isinstance(status, dict) and status.get('ok') is False:
                 return _from_status(status)
 
@@ -272,6 +281,8 @@ def register(app: FastAPI, runtime: Any) -> None:
                 _config_set(runtime, 'update.feed_url', str(feed_url).strip())
             if auto_check is not _MISSING:
                 _config_set(runtime, 'update.auto_check', bool(auto_check))
+            if auto_download is not _MISSING:
+                _config_set(runtime, 'update.auto_download', bool(auto_download))
             if interval_value is not None:
                 _config_set(runtime, 'update.interval_hours', interval_value)
             config = getattr(runtime, 'config', None)

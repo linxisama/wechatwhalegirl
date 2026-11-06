@@ -61,8 +61,12 @@ def _release_from_fetch(raw: Any) -> dict:
 class UpdateService:
     """单实例更新服务；构造时只读本地状态文件，不访问网络。"""
 
+    # 自动下载前的短暂停留：让 available 在界面上可见，用户也来得及点“跳过”。
+    AUTO_DOWNLOAD_DELAY = 0.5
+
     def __init__(self, data_dir: Path, current_version: str,
                  feed_url: str = '', auto_check: bool = True,
+                 auto_download: bool = True,
                  interval_hours: float = 24, clock: Callable[[], float] = time.time,
                  fetch: Callable[..., dict] = updater.fetch_release,
                  download: Callable[..., dict] = updater.download):
@@ -70,6 +74,7 @@ class UpdateService:
         self.current_version = str(current_version or '')
         self.feed_url = str(feed_url or '').strip()
         self.auto_check = bool(auto_check)
+        self.auto_download = bool(auto_download)
         try:
             self.interval_hours = max(0.0, float(interval_hours))
         except (TypeError, ValueError):
@@ -89,6 +94,10 @@ class UpdateService:
         self._last_check_at: float | None = None
         self._next_check_at: float | None = None
         self._skipped_version = ''
+        # 自动下载失败过的版本号：同一版本不再自动重试，用户手动点下载仍可重试。
+        self._auto_download_failed = ''
+        # 本次下载是否由自动下载触发（用于在下载线程里回填失败版本号）。
+        self._auto_download_for = ''
         self._last_result: dict | None = None
         self._installer: dict | None = None
         self._downloaded_path = ''
@@ -124,6 +133,7 @@ class UpdateService:
                     'last_check_at': self._last_check_at,
                     'next_check_at': next_check,
                     'auto': self.auto_check,
+                    'auto_download': bool(self.auto_download),
                     'feed_url': self.feed_url,
                     'downloaded_path': self._downloaded_path,
                     'installing': self._installing,
@@ -139,7 +149,8 @@ class UpdateService:
                 'notes': '', 'progress': {'received': 0, 'total': 0, 'percent': 0},
                 'error': {'reason': 'internal', 'message': '读取更新状态失败，请重启控制台'},
                 'last_check_at': None, 'next_check_at': None,
-                'auto': bool(self.auto_check), 'feed_url': self.feed_url,
+                'auto': bool(self.auto_check),
+                'auto_download': bool(self.auto_download), 'feed_url': self.feed_url,
                 'downloaded_path': '', 'installing': False, 'skipped': False,
                 'skipped_version': '', 'installer': None, 'installer_pid': None,
                 'storage_error': '',
@@ -210,6 +221,7 @@ class UpdateService:
         return _release_from_fetch(raw)
 
     def _check_worker(self) -> None:
+        discovered = ''
         try:
             release = self._fetch_release()
             latest = str(release.get('version') or '').strip()
@@ -246,6 +258,7 @@ class UpdateService:
                     self._state = 'available'
                     self._error = None
                     self._installer = dict(installer)
+                    discovered = latest
                 self._last_result = self._status_result()
         except UpdateError as error:
             with self._lock:
@@ -267,6 +280,58 @@ class UpdateService:
                 self._job = ''
             # 最后检查时间/结果要跨重启保留；写失败只记录 storage_error，不影响本次结果。
             self.save_state()
+        # 必须等 _thread 归零之后再启动下载：download() 会拒绝“已有线程存活”的调用。
+        self._maybe_auto_download(discovered)
+
+    def _maybe_auto_download(self, version: str) -> None:
+        """新发现的新版本 + 开了自动下载 + 该版本没自动下载失败过 → 后台下载。
+
+        只下载、只校验，绝不自动安装：安装前必须由用户确认。
+        """
+        if not version:
+            return
+        with self._lock:
+            if not self.auto_download:
+                return
+            if self._state != 'available' or not self._installer:
+                return
+            if version == self._auto_download_failed:
+                # 同一版本自动下载失败过就不再自动重试，避免“检查→失败”死循环。
+                return
+        # 另起线程并稍等片刻再下载：available 能在界面上露一下，用户也来得及点“跳过”。
+        # 注意不能占用 self._thread，否则这段等待会把界面上的手动下载挡成 busy。
+        thread = threading.Thread(target=self._auto_download_worker, args=(version,),
+                                  name='wechat-update-auto-download', daemon=True)
+        thread.start()
+
+    def _auto_download_worker(self, version: str) -> None:
+        """自动下载：任何失败都折叠成 error 状态，绝不外抛、不留 downloading。"""
+        time.sleep(self.AUTO_DOWNLOAD_DELAY)
+        with self._lock:
+            # 等待期间被跳过、被手动下载、被关掉开关或被新一次检查覆盖，就放弃本次自动下载。
+            if (self._state != 'available' or not self._installer
+                    or self._latest != version or not self.auto_download):
+                return
+            if version == self._auto_download_failed:
+                return
+            # 标记本次下载由自动下载触发；失败时由 _download_worker 记下版本号。
+            self._auto_download_for = version
+        try:
+            result = self.download()
+        except Exception:
+            # 自动下载绝不能把异常抛给调用方，也不能让状态卡在 downloading。
+            with self._lock:
+                self._auto_download_for = ''
+                self._auto_download_failed = version
+                if self._state in ('available', 'downloading'):
+                    self._state = 'error'
+                    self._error = {'reason': 'internal',
+                                   'message': '自动下载更新包时发生内部错误，请手动重试'}
+            return
+        with self._lock:
+            if not isinstance(result, dict) or result.get('ok') is False:
+                # download() 被拒绝（busy / not_available）：本次不再重试，状态保持原样。
+                self._auto_download_for = ''
 
     def _status_result(self) -> dict:
         return {
@@ -276,6 +341,7 @@ class UpdateService:
             'notes': self._notes,
             'error': dict(self._error) if self._error else None,
             'skipped': bool(self._skipped_version and self._skipped_version == self._latest),
+            'auto_download': bool(self.auto_download),
         }
 
     # ── 下载 ─────────────────────────────────────────────────────────
@@ -373,7 +439,11 @@ class UpdateService:
                     'reason': str(payload.get('reason') or 'internal'),
                     'message': str(payload.get('message') or '下载失败，请重试'),
                 }
+                if self._auto_download_for:
+                    # 自动下载失败：记下版本号，同一版本不再自动重试（手动点下载仍可重试）。
+                    self._auto_download_failed = self._auto_download_for
                 self._last_result = self._status_result()
+            self._auto_download_for = ''
             self._thread = None
             self._job = ''
         self.save_state()
@@ -446,13 +516,19 @@ class UpdateService:
     # ── 配置 ─────────────────────────────────────────────────────────
     def configure(self, feed_url: str | None = None,
                   auto_check: bool | None = None,
-                  interval_hours: float | None = None) -> dict:
+                  interval_hours: float | None = None,
+                  auto_download: bool | None = None) -> dict:
         with self._lock:
             old_feed = self.feed_url
             if feed_url is not None:
                 self.feed_url = str(feed_url or '').strip()
             if auto_check is not None:
                 self.auto_check = _bool_value(auto_check, self.auto_check)
+            if auto_download is not None:
+                self.auto_download = _bool_value(auto_download, self.auto_download)
+                # 重新打开开关时忘掉上次失败，否则用户改完设置也不会再自动下载。
+                if self.auto_download:
+                    self._auto_download_failed = ''
             if interval_hours is not None:
                 try:
                     self.interval_hours = max(0.0, float(interval_hours))

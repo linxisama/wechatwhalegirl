@@ -5543,6 +5543,12 @@ class MainWindow(QWidget):
         self._update_timer.setInterval(9000)
         self._update_timer.timeout.connect(self._auto_check_update)
         self._update_timer.start()
+        # 只查一次等于永远不再查：用户开着控制台好几天就再也收不到新版本提示。
+        # 24 小时重复一次，靠 _auto_check_update 里的"本轮已查过"闸门避免叠加请求。
+        self._update_recheck_timer = QTimer(self)
+        self._update_recheck_timer.setInterval(24 * 60 * 60 * 1000)
+        self._update_recheck_timer.timeout.connect(self._auto_check_update)
+        self._update_recheck_timer.start()
         vbox.addWidget(self.tabs)
 
         # 调整大小手柄
@@ -5768,26 +5774,48 @@ class MainWindow(QWidget):
         刻意不做的事：不自动下载、不自动安装、失败不弹窗（没配更新源或离线都属正常，
         弹窗只会变成噪音）；用户想知道细节点「环境与自检 → 检查更新」。
         """
-        if getattr(self, '_update_checked', False) or getattr(self, '_quitting', False):
+        # 闸门只在"本轮"有效：请求一落地就放开，24 小时后才能再查一次。
+        # 以前这里是永久一次性标记，等于第二次自动检查永远不来。
+        if getattr(self, '_update_checking', False) or getattr(self, '_quitting', False):
             return
         if not self.isVisible():
             return
+        self._update_checking = True
         self._update_checked = True
 
         def done(data):
+            self._update_checking = False
             if not isinstance(data, dict) or data.get('ok') is False:
                 return
             status = data.get('status') if isinstance(data.get('status'), dict) else data
-            if str(status.get('state') or '') != 'available':
-                return
+            state = str(status.get('state') or '')
             latest = str(status.get('latest') or '').strip()
+            if not latest:
+                return
             try:
-                self.console_tab.set_notice(
-                    f'发现新版本 {latest}：点「环境与自检 → 检查更新」查看更新说明并安装', ok=True)
+                if state == 'downloaded':
+                    # 已下载但用户还没装：这条提示不能用"发现新版本"的标记去重，
+                    # 否则从 available 走到 downloaded 的那一次会一句话都不说。
+                    if getattr(self, '_notified_ready_version', '') == latest:
+                        return
+                    self._notified_ready_version = latest
+                    self.console_tab.set_notice(
+                        f'新版本 {latest} 已下载并通过 SHA256 校验：'
+                        f'点「环境与自检 → 检查更新」安装', ok=True)
+                elif state == 'available':
+                    if getattr(self, '_notified_update_version', '') == latest:
+                        return
+                    self._notified_update_version = latest
+                    self.console_tab.set_notice(
+                        f'发现新版本 {latest}：点「环境与自检 → 检查更新」查看更新说明并安装', ok=True)
             except Exception:
                 pass
 
-        call_api(self, 'GET', 'update/status', timeout=10, on_done=done)
+        try:
+            call_api(self, 'GET', 'update/status', timeout=10, on_done=done)
+        except Exception:
+            # 同步分支抛错时 done 不会跑，闸门必须在这里放开，否则再也不查了
+            self._update_checking = False
     def _load_settings(self):
         if getattr(self, '_quitting', False):
             return
