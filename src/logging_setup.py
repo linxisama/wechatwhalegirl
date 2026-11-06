@@ -29,6 +29,15 @@ NOISY_LOGGERS = ("httpx", "httpcore", "urllib3", "requests", "asyncio")
 _NOISY_LEVEL = logging.WARNING
 _HANDLER_TAG = "_wechat_backend_log"
 DEFAULT_TAIL_BYTES = 200 * 1024
+# 结构化索引：backend.log 是给人看的全文，GUI 每次轮询要"最近错误"时不该读全量文件。
+# 每行一条 JSON（时间/级别/模块/消息前 200 字/trace id），只收 WARNING 以上；
+# 到上限就只留最近若干行——索引自己绝不允许长成第二个大文件。
+LOG_INDEX_NAME = "index.jsonl"
+LOG_INDEX_MAX_BYTES = 256 * 1024
+LOG_INDEX_KEEP_LINES = 400
+LOG_INDEX_MESSAGE_CHARS = 200
+LOG_INDEX_LEVEL = logging.WARNING
+_INDEX_HANDLER_TAG = "_wechat_log_index"
 # 正常轮换文件上限为 5MB；指纹复核留一倍余量，不扫描任意大的外部日志。
 _CONTENT_FINGERPRINT_LIMIT = 10 * 1024 * 1024
 _CONTENT_FINGERPRINT_CHUNK = 64 * 1024
@@ -44,6 +53,9 @@ _CHAIN_HEADS = ("During handling of the above exception",
 
 _hooks_installed = False
 _hook_lock = threading.Lock()
+# setup/restore 都会增删 root handler：并发进来（监听线程 + 发送子进程收尾）会把
+# 同一个文件挂成多个 handler，同一条日志就被写好几份。
+_setup_lock = threading.RLock()
 
 
 def log_folder(root=None) -> Path:
@@ -66,17 +78,58 @@ def _resolve_level(level=None) -> int:
     return value if isinstance(value, int) else logging.INFO
 
 
+# 日志本身也是排障材料（诊断包会把 backend.log 整份导出），所以凭据必须在落盘那一刻
+# 就抹掉，而不是等导出时再补一次。先跑一遍廉价关键字预筛：绝大多数行不含凭据字样，
+# 没必要为它们执行完整脱敏正则。
+_PHONE = re.compile(r'(?<!\d)1[3-9]\d{9}(?!\d)')
+_SENSITIVE_HINT = re.compile(
+    r'(?i)(?:token|secret|passw|pwd|credential|cookie|authorization|bearer|'
+    r'private[ _-]?key|api[_-]?key|x-api-key|sk-|AIza|ghp_|session)'
+    r'|(?<!\d)1[3-9]\d{9}(?!\d)')
+_REDACTED_TEXT = "[已脱敏]"
+_REDACTOR = None
+
+
+def _redactor():
+    """取诊断导出用的脱敏器；本模块被当成顶层模块导入时退回绝对导入。"""
+    global _REDACTOR, _REDACTED_TEXT
+    if _REDACTOR is None:
+        try:
+            from . import diagnostic_redaction as module
+        except ImportError:
+            try:
+                import diagnostic_redaction as module  # type: ignore
+            except ImportError:
+                module = None
+        if module is not None:
+            _REDACTOR = getattr(module, "redact_diagnostic_text", None)
+            _REDACTED_TEXT = getattr(module, "REDACTED", _REDACTED_TEXT)
+        _REDACTOR = _REDACTOR or (lambda value: value)
+    return _REDACTOR
+
+
+def redact_for_log(value) -> str:
+    """落盘前抹掉凭据与手机号；自身绝不抛异常，日志链路不许因为脱敏而断掉。"""
+    text = str(value or "")
+    try:
+        if not _SENSITIVE_HINT.search(text):
+            return text
+        return _PHONE.sub(_REDACTED_TEXT, _redactor()(text))
+    except BaseException:
+        return text
+
+
 def _safe_target(folder: Path) -> Path:
     """日志目录不可写时退回临时目录：安装目录只读不能连累启动。"""
     try:
         folder.mkdir(parents=True, exist_ok=True)
         return folder / LOG_FILE_NAME
-    except OSError:
-        pass
+    except (OSError, ValueError):
+        pass  # 非法路径（如内嵌 NUL）抛的是 ValueError，不是 OSError
     fallback = Path(tempfile.gettempdir()) / "WhaleGirlWeChat-logs"
     try:
         fallback.mkdir(parents=True, exist_ok=True)
-    except OSError:
+    except (OSError, ValueError):
         return folder / LOG_FILE_NAME
     return fallback / LOG_FILE_NAME
 
@@ -105,17 +158,159 @@ class _CloseAfterEmitHandler(RotatingFileHandler):
             self.stream = None
 
 
+class _RedactingFormatter(logging.Formatter):
+    """整行格式化完再脱敏：异常钩子的 traceback 与普通记录走同一道关口。"""
+
+    def format(self, record):
+        return redact_for_log(super().format(record))
+
+
 def _make_handler(target: Path):
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
         # delay=True：进程没写日志就不占用文件，用户在资源管理器里能直接删/复制日志
         handler = _CloseAfterEmitHandler(target, maxBytes=LOG_MAX_BYTES,
                                          backupCount=LOG_BACKUP_COUNT, encoding="utf-8", delay=True)
-    except OSError:
-        return None
-    handler.setFormatter(logging.Formatter(LOG_FORMAT))
+    except (OSError, ValueError):
+        return None  # 内嵌 NUL 之类的非法路径抛 ValueError，不能连累启动
+    handler.setFormatter(_RedactingFormatter(LOG_FORMAT))
     setattr(handler, _HANDLER_TAG, _key(target))
     return handler
+
+
+_index_lock = threading.Lock()  # 索引追加与裁剪共用：绝不并发改同一个文件
+_TRACE_ID = re.compile(r"\btrace[_-]?id[=:]\s*([A-Za-z0-9_.:-]{1,64})", re.I)
+
+
+def _index_entry(record) -> dict:
+    """一条索引行只留排障需要的最小字段；消息压成单行、脱敏、截断 200 字。"""
+    try:
+        message = record.getMessage()
+    except BaseException:
+        message = str(record.msg)
+    message = re.sub(r"\s+", " ", redact_for_log(message)).strip()
+    entry = {
+        "ts": datetime.datetime.fromtimestamp(record.created).strftime("%Y-%m-%d %H:%M:%S"),
+        "level": record.levelname,
+        "module": record.name,
+        "msg": message[:LOG_INDEX_MESSAGE_CHARS],
+    }
+    trace = _TRACE_ID.search(message)
+    if trace:
+        entry["trace"] = trace.group(1)
+    return entry
+
+
+class _LogIndexHandler(logging.Handler):
+    """把 WARNING 以上的记录摘成一行 JSON，给 GUI 一条不读全量文件的快路径。
+
+    与 backend.log 分工：全文仍归 RotatingFileHandler；这里只留
+    时间/级别/模块/前 200 字/trace id，到 LOG_INDEX_MAX_BYTES 就裁到
+    LOG_INDEX_KEEP_LINES 行——索引自己绝不允许长成第二个大文件。
+    """
+
+    def __init__(self, path):
+        super().__init__(LOG_INDEX_LEVEL)
+        self.baseFilename = str(path)
+        setattr(self, _INDEX_HANDLER_TAG, _key(path))
+
+    def emit(self, record):
+        try:
+            line = json.dumps(_index_entry(record), ensure_ascii=False) + "\n"
+            self._append(line.encode("utf-8"))
+            self._trim_if_needed()
+        except BaseException:
+            return  # 索引坏了只当没写：全文日志照旧，绝不能反噬业务
+
+    def _append(self, data):
+        path = Path(self.baseFilename)
+        with _index_lock:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            # 整行一次 os.write 追加：多线程并发时不会各写半行拼成坏 JSON
+            flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_BINARY", 0)
+            handle = os.open(str(path), flags, 0o644)
+            try:
+                os.write(handle, data)
+            finally:
+                os.close(handle)
+
+    def _trim_if_needed(self):
+        path = Path(self.baseFilename)
+        try:
+            if path.stat().st_size <= LOG_INDEX_MAX_BYTES:
+                return
+        except (OSError, ValueError):
+            return
+        with _index_lock:
+            try:
+                with path.open("r", encoding="utf-8", errors="replace") as stream:
+                    lines = stream.readlines()
+            except (OSError, ValueError):
+                return
+            if len(lines) <= LOG_INDEX_KEEP_LINES:
+                return
+            temp = path.with_name(path.name + ".tmp")
+            with temp.open("w", encoding="utf-8", newline="\n") as stream:
+                stream.writelines(lines[-LOG_INDEX_KEEP_LINES:])
+            os.replace(str(temp), str(path))
+
+
+def log_index_path(folder=None) -> Path:
+    """结构化索引的位置：与 backend.log 同目录，发送子进程也写同一份。"""
+    folder = Path(folder) if folder is not None else log_folder()
+    return folder / LOG_INDEX_NAME
+
+
+def read_log_index(folder=None, limit=50) -> list:
+    """读最近 limit 条索引（新的在后）；文件缺失、半行、非法路径都只返回已解析部分。"""
+    path = log_index_path(folder)
+    try:
+        count = max(0, int(limit))
+    except (TypeError, ValueError):
+        count = 50
+    entries = []
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as stream:
+            for line in stream:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    entry = json.loads(line)
+                except ValueError:
+                    continue  # 半行/被截断的历史行：跳过，不能让调用方崩
+                if isinstance(entry, dict):
+                    entries.append(entry)
+    except (OSError, ValueError):
+        return []
+    return entries[-count:] if count else []
+
+
+def _index_handlers(root, folder: Path):
+    want = _key(folder / LOG_INDEX_NAME)
+    return [h for h in root.handlers if getattr(h, _INDEX_HANDLER_TAG, None) == want]
+
+
+def _ensure_index_handler(root, folder: Path) -> None:
+    """索引 handler 同样幂等：同一目录只挂一个，换目录时摘掉旧的。"""
+    want = _key(folder / LOG_INDEX_NAME)
+    kept = _index_handlers(root, folder)
+    for extra in kept[1:]:
+        root.removeHandler(extra)
+        _close_quietly(extra)
+    if not kept:
+        try:
+            (folder / LOG_INDEX_NAME).parent.mkdir(parents=True, exist_ok=True)
+            handler = _LogIndexHandler(folder / LOG_INDEX_NAME)
+        except (OSError, ValueError):
+            handler = None
+        if handler is not None:
+            root.addHandler(handler)
+    for old in list(root.handlers):
+        owner = getattr(old, _INDEX_HANDLER_TAG, None)
+        if owner is not None and owner != want:
+            root.removeHandler(old)
+            _close_quietly(old)
 
 
 def _tagged_handlers(root, target: Path):
@@ -138,13 +333,19 @@ def restore_backend_handler() -> bool:
     与级别把 handler 重挂回去，不动别人的 handler。
     """
     target = _LAST_TARGET
-    if target is None or backend_log_path() is not None:
+    if target is None:
         return False
     root = logging.getLogger()
-    handler = _make_handler(Path(target))
-    if handler is None:
-        return False
-    root.addHandler(handler)
+    # 检查与挂载必须在同一把锁里：多线程同时进（监听线程 + 发送收尾）时，
+    # 各自都看到"没有 handler"，就会挂上好几份，同一条日志写好几遍。
+    with _setup_lock:
+        if backend_log_path() is not None:
+            return False
+        handler = _make_handler(Path(target))
+        if handler is None:
+            return False
+        root.addHandler(handler)
+        _ensure_index_handler(root, Path(target).parent)
     if _LAST_LEVEL is not None:
         root.setLevel(_LAST_LEVEL)
     for name in NOISY_LOGGERS:
@@ -162,11 +363,18 @@ def setup_logging(folder=None, level=None) -> Path:
     folder = Path(folder) if folder is not None else log_folder()
     target = _safe_target(folder)
     root = logging.getLogger()
-    root.setLevel(_resolve_level(level))
-    _LAST_TARGET, _LAST_LEVEL = target, root.level
-    for name in NOISY_LOGGERS:
-        logging.getLogger(name).setLevel(_NOISY_LEVEL)
+    with _setup_lock:  # 并发 setup 会把同一个文件挂成多个 handler
+        root.setLevel(_resolve_level(level))
+        _LAST_TARGET, _LAST_LEVEL = target, root.level
+        for name in NOISY_LOGGERS:
+            logging.getLogger(name).setLevel(_NOISY_LEVEL)
+        _ensure_backend_handler(root, target)
+        _ensure_index_handler(root, target.parent)
+    return target
 
+
+def _ensure_backend_handler(root, target: Path) -> None:
+    """同一目标只留一个 backend.log handler；换目录时把旧的摘掉。"""
     kept = _tagged_handlers(root, target)
     if kept:
         for extra in kept[1:]:
@@ -185,7 +393,6 @@ def setup_logging(folder=None, level=None) -> Path:
         if owner is not None and owner != _key(target):
             root.removeHandler(old)
             _close_quietly(old)
-    return target
 
 
 def is_backend_log_configured(folder=None) -> bool:
@@ -622,8 +829,8 @@ def read_new_errors(path, offset: int = 0, max_bytes: int = DEFAULT_TAIL_BYTES, 
         try:
             stat = item.stat()
             files.append((item, (stat.st_dev, stat.st_ino), stat.st_size))
-        except OSError:
-            continue
+        except (OSError, ValueError):
+            continue  # 内嵌 NUL 之类的非法路径抛 ValueError，跟"文件不存在"一样安静跳过
     if not files:
         return [], cursor
     current_index = next((i for i, (_, identity, _) in enumerate(files)
@@ -718,7 +925,7 @@ def read_new_errors(path, offset: int = 0, max_bytes: int = DEFAULT_TAIL_BYTES, 
                 cursor.anchor = handle.read(min(position, 64))
                 handle.seek(0)
                 cursor.prefix = handle.read(min(position, 64))
-        except OSError:
+        except (OSError, ValueError):
             break
         publish()
         if budget <= 0 or position < size:
