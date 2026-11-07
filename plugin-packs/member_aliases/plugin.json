@@ -7,7 +7,11 @@
   "description": "记下群友的自称外号，命中才往提示词里加几行，让模型认人；默认关闭",
   "api_version": 2,
   "requires": "1.3.0",
-  "data_policy": "只在本机读写插件自己的设置与状态，不上传聊天内容",
+  "data_policy": [
+    "own_settings",
+    "own_state",
+    "chat_content"
+  ],
   "native": "纯 Python，不依赖外部程序",
   "side": "本机侧运行",
   "upstream": "随控制台源码分发（plugin-packs 种子包）",

@@ -166,10 +166,40 @@ class PluginBase:
         "迁移失败（不影响运行）"）。需要落盘改设置的插件请把逻辑放这儿。
         """
 
+    def data_dir(self, *parts: str) -> Path:
+        """插件自己的数据目录：state_dir/<插件 id>/，可用 parts 继续下钻。
+
+        为什么要有这个方法（1.3.106）：state_file 只返回一个文件路径，
+        插件想建子目录、想放多个文件时只能自己拼路径 —— 一拼就可能拼到别人
+        目录里，或者用 .. 跳出插件自己的命名空间。这里统一收口：
+        任何一段含 .. / 绝对路径 / 盘符的入参都直接抛 ValueError，
+        不会静默截断成别的路径（静默截断比报错危险：插件以为写到了 A，
+        实际写到了 B）。
+        """
+        base = self._manager.state_dir / self.META.id
+        for part in parts:
+            text = str(part)
+            if not text or text in (".", ".."):
+                raise ValueError("数据路径不能为空、. 或 ..：" + repr(part))
+            if "/" in text or "\\" in text:
+                raise ValueError("数据路径只能是一段名字，不能含分隔符：" + repr(part))
+            if text[1:2] == ":":
+                raise ValueError("数据路径不能带盘符：" + repr(part))
+            base = base / text
+        base.mkdir(parents=True, exist_ok=True)
+        return base
+
     def state_file(self, name: str) -> Path:
-        p = self._manager.state_dir / self.META.id
-        p.mkdir(parents=True, exist_ok=True)
-        return p / name
+        # name 也走同一套校验：state_file("../别的插件/x.json") 必须被拒，
+        # 否则数据命名空间就是摆设。
+        text = str(name)
+        if not text or text in (".", ".."):
+            raise ValueError("状态文件名不能为空、. 或 ..：" + repr(name))
+        if "/" in text or "\\" in text:
+            raise ValueError("状态文件名只能是一段名字，不能含分隔符：" + repr(name))
+        if text[1:2] == ":":
+            raise ValueError("状态文件名不能带盘符：" + repr(name))
+        return self.data_dir() / text
 
     def load_state(self, name: str, default=None):
         f = self.state_file(name)

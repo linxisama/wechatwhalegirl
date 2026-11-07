@@ -39,7 +39,7 @@ def _strict(**overrides):
         "description": "权限测试用",
         "api_version": 2,
         "requires": "1.3.0",
-        "data_policy": "只写自己的设置",
+        "data_policy": ["own_settings", "own_state"],
         "native": "纯 Python",
         "side": "本机侧运行",
         "upstream": "本地测试",

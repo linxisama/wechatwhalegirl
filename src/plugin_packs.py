@@ -60,6 +60,19 @@ SUPPORTED_API_VERSIONS: Tuple[int, ...] = (1, 2)
 # 否则已装的三方包会在升级当天集体失效。
 STRICT_API_VERSION = 2
 
+# data_policy 的结构化枚举（1.3.106）。清单里原本是一段自由文本，
+# 只能给人看，代码读不出「这个插件碰不碰聊天内容」。改成可选标签：
+#   none            什么都不碰（纯计算）
+#   own_settings    读写自己的设置
+#   own_state       读写自己的状态文件
+#   chat_content    接触聊天内容（消息正文、图片、语音）
+#   external_network 把数据发到本机以外
+# 自由文本仍然接受（存量包全是中文描述），但会被归一成空标签 + 保留原文，
+# 严格档下要求至少声明一个标签。
+DATA_POLICY_TAGS: Tuple[str, ...] = (
+    "none", "own_settings", "own_state", "chat_content", "external_network",
+)
+
 # capabilities 的合法取值。前一组是钩子（插件在链路某一步被调用），
 # 后一组是非钩子能力 —— 有些插件一个钩子都不实现也完全合法：
 #   settings = 纯设置门（例如 sticker_admin 只是藏起管理入口）
@@ -247,6 +260,12 @@ def _check_manifest(data: Any, host_version: str, pack_dir: Optional[Path] = Non
         value = data.get(field)
         if value is None:
             continue
+        if field == "data_policy":
+            # 1.3.106 起 data_policy 可以是标签列表；文本形态在下面单独归一，
+            # 这里不能按「必须是文本」判死，否则新写法永远过不了。
+            if isinstance(value, str):
+                meta[field] = value.strip()
+            continue
         if not isinstance(value, str):
             errors.append("字段 " + field + " 必须是文本")
             continue
@@ -273,6 +292,20 @@ def _check_manifest(data: Any, host_version: str, pack_dir: Optional[Path] = Non
                 errors.append("permissions 含未知权限：" + "、".join(bad)
                               + "（可用 " + " / ".join(PERMISSION_NAMES) + "）")
             meta["permissions"] = list(normalize(raw_permissions))
+
+    # data_policy：结构化标签（1.3.106）。自由文本仍然收（存量包全是中文描述），
+    # 但只保留原文、不打标签；严格档下要求至少一个标签，让代码读得出「碰不碰聊天内容」。
+    raw_policy = data.get("data_policy")
+    if isinstance(raw_policy, list):
+        tags = [str(item).strip().lower() for item in raw_policy if str(item).strip()]
+        bad_tags = [item for item in tags if item not in DATA_POLICY_TAGS]
+        if bad_tags:
+            errors.append("data_policy 含未知标签：" + "、".join(bad_tags)
+                          + "（可用 " + " / ".join(DATA_POLICY_TAGS) + "）")
+        else:
+            meta["data_policy_tags"] = list(dict.fromkeys(tags))
+    elif isinstance(raw_policy, str) and raw_policy.strip():
+        meta["data_policy_tags"] = []   # 自由文本：保留原文（已在 TEXT_FIELDS 里），不打标签
 
     # capabilities 是能力名称列表（例如 reply / summary），只用于展示，不参与加载判断
     raw_caps = data.get("capabilities")
@@ -322,6 +355,11 @@ def _check_manifest(data: Any, host_version: str, pack_dir: Optional[Path] = Non
             if value is None or (isinstance(value, str) and not value.strip()):
                 errors.append("严格档（api_version " + str(STRICT_API_VERSION)
                               + "）缺少必需字段 " + field)
+        policy_tags = meta.get("data_policy_tags")
+        if policy_tags is not None and not policy_tags:
+            errors.append("严格档（api_version " + str(STRICT_API_VERSION)
+                          + "）的 data_policy 必须是标签列表，不能是自由文本或空：可用 "
+                          + " / ".join(DATA_POLICY_TAGS))
         caps = meta.get("capabilities")
         if caps is not None and not caps:
             errors.append("严格档（api_version " + str(STRICT_API_VERSION)

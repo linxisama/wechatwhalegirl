@@ -7,7 +7,11 @@
   "description": "参考 QQ 群聊总结：发送 /总结群聊 或 /总结群聊 6，统计当前群的活跃成员、活跃时段与主要话题。只用本机已记录内容，在当前会话被动回复；不定时推送、不切换微信窗口。",
   "api_version": 2,
   "requires": "1.3.0",
-  "data_policy": "只在本机读写插件自己的设置与状态，不上传聊天内容",
+  "data_policy": [
+    "own_settings",
+    "own_state",
+    "chat_content"
+  ],
   "native": "纯 Python，不依赖外部程序",
   "side": "本机侧运行",
   "upstream": "随控制台源码分发（plugin-packs 种子包）",

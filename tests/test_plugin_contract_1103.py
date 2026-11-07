@@ -37,7 +37,7 @@ def _strict(**overrides):
         "description": "严格档测试用",
         "api_version": STRICT_API_VERSION,
         "requires": "1.3.0",
-        "data_policy": "只写自己的设置与状态",
+        "data_policy": ["own_settings", "own_state"],
         "native": "纯 Python",
         "side": "本机侧运行",
         "upstream": "本地测试",

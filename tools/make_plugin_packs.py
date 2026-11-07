@@ -68,6 +68,21 @@ def capabilities_of(pack_id: str, cls) -> list:
     return sorted(names)
 
 
+# data_policy 从 1.3.106 起是标签列表（见 src/plugin_packs.py 的 DATA_POLICY_TAGS）。
+# 生成器按插件的真实能力给标签：联网的加 external_network，看聊天内容的加
+# chat_content，其余至少给 own_settings —— 严格档要求非空。
+DATA_POLICY = {
+    "group_ambient": ["own_settings", "own_state", "chat_content"],
+    "group_summary": ["own_settings", "own_state", "chat_content"],
+    "image_library": ["own_settings", "own_state", "chat_content"],
+    "member_aliases": ["own_settings", "own_state", "chat_content"],
+    "reply_pace": ["own_settings"],
+    "sticker_admin": ["own_settings", "own_state"],
+    "sticker_memory": ["own_settings", "own_state", "chat_content"],
+    "sticker_steal": ["own_settings", "own_state", "chat_content"],
+    "web_context": ["own_settings", "own_state", "external_network"],
+    "web_lookup": ["own_settings", "own_state", "external_network", "chat_content"],
+}
 def manifest_of(pack_id: str, cls) -> dict:
     meta = cls.META
     description = MARKET_DESCRIPTIONS.get(pack_id) or meta.description
@@ -80,7 +95,7 @@ def manifest_of(pack_id: str, cls) -> dict:
         "description": description,
         "api_version": API_VERSION,
         "requires": REQUIRES,
-        "data_policy": "只在本机读写插件自己的设置与状态，不上传聊天内容",
+            "data_policy": DATA_POLICY[pack_id],
         "native": "纯 Python，不依赖外部程序",
         "side": "本机侧运行",
         "upstream": "随控制台源码分发（plugin-packs 种子包）",

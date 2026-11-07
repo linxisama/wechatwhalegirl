@@ -1,3 +1,17 @@
+## 1.3.106
+
+数据命名空间 + `data_policy` 结构化。
+
+- **问题一：数据没有命名空间**。`state_file(name)` 只是 `state_dir/<id>/<name>` 的字符串拼接，`name` 里写 `../别的插件/x.json` 就能跳出自己的目录。插件之间可以互相覆盖数据，卸载一个插件可能带走另一个的。
+- **修法**：新增 `PluginBase.data_dir(*parts) -> Path`，统一收口到 `state_dir/<插件 id>/`；任何一段含 `..` / `.` / 空串 / 路径分隔符 / 盘符的入参**直接抛 ValueError**。`state_file` 改走同一套校验，不再自己拼路径。
+- **为什么静默截断比报错危险**：插件以为写到了 A，实际写到了 B，问题要等到数据串了才发现。
+- **`state_file('cache').parent` 仍然可用**（`image_library` 依赖它建 `downloads` 兄弟目录），这条行为有测试守着。
+- **问题二：`data_policy` 只是一段自由文本**。中文描述只能给人看，代码读不出「这个插件碰不碰聊天内容」。
+- **修法**：`DATA_POLICY_TAGS = ("none", "own_settings", "own_state", "chat_content", "external_network")`。清单可以写标签列表，归一成小写去重后存进 `meta["data_policy_tags"]`；写未知标签报错并列出五个可用名。
+- **两档兼容**：自由文本在兼容档（`api_version 1`）仍然接受（存量包全是中文描述），但 `data_policy_tags` 为空；严格档（`api_version >= 2`）要求必须是标签列表，自由文本与空都判非法。
+- **10 个种子包全部改成标签**，按真实能力填：联网的 `web_context` / `web_lookup` 声明 `external_network`；看聊天内容的声明 `chat_content`；`reply_pace` 只碰自己的设置，声明 `own_settings`。`tools/make_plugin_packs.py` 新增 `DATA_POLICY` 表同步，生成结果与仓库逐字节一致 10/10。
+- **顺带修的一处**：`TEXT_FIELDS` 里含 `data_policy`，原来会按「必须是文本」判死标签列表。改成该字段单独归一——否则新写法永远过不了自己的校验。
+- 测试：新增 `tests/test_plugin_data_1106.py` 22 例。与 13 个相关模块一起跑 `Ran 284 tests in 22.526s` / `OK`；全量回归 `Ran 4558 tests`（三片 1657 + 1471 + 1430，skipped=21），唯二非通过项为 `tests/test_cross_machine_paths151.py` 长路径（本机 TEMP 仅 33 字符，环境依赖，与本批无关）。
 ## 1.3.105
 
 权限五项 + 执行前校验：把「明面上的代价」变成真东西。
