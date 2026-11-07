@@ -21,7 +21,7 @@ from .sticker_library import (MAX_BYTES, StickerLibrary, frames_for_vision,
                               inspect_image, thumbnail_png)
 
 PAGE_SIZE = 12
-# 单次导入总量上限：防止有人一次拖 20 张 6MB 的图把请求体撑爆
+# 单次导入总量上限：防止一次导入把请求体撑爆（单次上限 64MB）
 IMPORT_TOTAL_BYTES = 64 * 1024 * 1024
 
 
@@ -131,7 +131,7 @@ def add_routes(app):
                 if not path.is_relative_to(managed) or not path.is_file():
                     raise ValueError("请使用管理窗的上传按钮选择图片")
                 if path.stat().st_size > MAX_BYTES:
-                    raise ValueError("单张图片不能超过6MB")
+                    raise ValueError(f"单张图片不能超过{MAX_BYTES // 1024 // 1024}MB")
                 data = path.read_bytes()
                 total += len(data)
                 if total > IMPORT_TOTAL_BYTES:

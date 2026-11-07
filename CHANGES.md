@@ -1,3 +1,14 @@
+## 1.3.99
+
+表情库三处淘汰缺陷：存一张大图会把整个收藏夹清空、刚存的图会被自己挤掉、索引写失败后磁盘上留下指向空文件的条目。外加两处和代码对不上的过期文案。
+
+- **单图超过容量上限会清空整个收藏夹**（`src/sticker_library.py:299-305`）：`put()` 先落图再调 `_evict()`，而 `_evict()` 的淘汰循环没有「不能淘汰刚入库这条」的概念。传一张 1700x1700 的噪声 PNG（8,684,042 字节）配 `max_mb=6` 时，这一条自己就是超限的原因，于是被自己淘汰掉：`self._entries` 变成空字典，`return self.get(digest)` 抛 `KeyError`，用户看到的是「存一张图，收藏夹全没了」。现在写盘之前先算 `cap = self._cap_bytes(max_mb)`，`len(data) > cap` 直接 `raise ValueError`，文案给出可执行指引（「这张图 8.3MB 比表情库容量上限 6MB 还大，先把容量调大或换一张小一点的图」）。拒绝发生在落图之前，库一个字节都不动。
+- **新图会被自己挤掉**（`src/sticker_library.py:352-372`）：淘汰按 `(last_used, created)` 升序挑最小值，而新 entry 的 `last_used` 恒为 `0`。库里 10 张图每张都 `used()` 过一次之后（`max_items=10` 填满），再 `put()` 第 11 张，它自己是全库最小 → 立刻被淘汰 → 同样 `KeyError`。`_evict()` 新增 `keep` 参数，候选集先排除 `id == keep`；候选为空就 `break`（只剩刚入库这一条还超限，留着它比清空好）。
+- **`_evict()` 不再自己删文件**（`src/sticker_library.py:354-359` / `:338-345`）：原来先 `unlink` 旧图、`:321` 才写索引，`_save()` 抛 `OSError`（磁盘满、权限）时旧图已经删掉且撤不回，索引里仍列着它们，重启后点开或发送直接 `FileNotFoundError`。现在 `_evict()` 只算结果、返回 `(entries, victims)`，函数体内一行 `unlink` 都没有；`put()` 在 `_save()` **成功之后**才逐个删 `victims` 的文件（`try/except OSError: pass`，删不掉就留着，最多多占一点磁盘，不会出现悬空条目）。`_save()` 失败的分支保持不变：撤掉刚落的图并重新抛出，此时旧图一张没删、索引没变，库仍是原样。
+- **容量上限只在一个地方算**（`src/sticker_library.py:348-350`）：新增 `_cap_bytes(max_mb=None)`，`put()` 的提前拒绝与 `_evict()` 的淘汰判定共用它，避免两处对 `max_mb` 的钳制（`max(6, ...)`）各写一遍而漂移。
+- **导入接口的报错跟着上限走**（`src/sticker_api.py:134`）：原来硬编码 `"单张图片不能超过6MB"`，而实际判定用的是 `MAX_BYTES`（12MB）——用户传 8MB 的图被拒时看到的上限是错的。改为 `f"单张图片不能超过{MAX_BYTES // 1024 // 1024}MB"`。`:24` 的注释同时说清 `MAX_BYTES` 管的是「一次导入的请求体总量」，改写成「单次导入总量上限：防止一次导入把请求体撑爆（单次上限 64MB）」，不再被误读成单张上限。
+- **内部契约里的上限过期**（`instructions/WECHAT-CONTRACT.md:913` / `:1317`）：两处还写着「6MB 上限」「单张 ≤6MB」，与 `MAX_BYTES = 12MB` 不符，分别改为 12MB。
+- **测试**：新增 `tests/test_sticker_evict1399.py` 6 例——超容量拒绝且旧库不变、空库超容量不留空索引、全部 used 后仍能存新图、`_save()` 失败不删旧图（连磁盘上的 `index.json` 也要仍是旧的 10 条）、正常淘汰 12→10 且每个 `path_for` 都读得到、LRU 顺序（刚用过的存活、最久未用的被淘汰）。表情库相关 11 个模块一起跑 `Ran 146 tests` / `OK (skipped=1)`；全量回归 `Ran 4457 tests`（三片 1433 + 1382 + 1642），唯三非通过项都是环境/时序依赖（两例 `tests/test_cross_machine_paths151.py` 长路径、一例 `tests/test_desktop_startup.py` 分片抖动，单独跑均通过）。用 `git show HEAD:src/sticker_library.py` 把改前的实现换回去跑同一套用例，6 例里 4 例真红（两例 `KeyError`、两例旧图被删），剩下两例是正常淘汰与 LRU 的回归护栏。
 ## 1.3.98
 
 四处审计出来的真实缺陷：一个错码模板永远选不中、一处强信号词只查原串导致变形写法漏判、一段重复定义且无人调用的死代码、以及落盘失败被静默吞掉。

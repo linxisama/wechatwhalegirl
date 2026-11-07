@@ -910,7 +910,7 @@ XML，含 `cdnurl` / `md5` / `len`：实测 4.1.15.13 下 `cdnurl` 返回 **200 
    `md5`、`size`；拿不到 url 时不填该键（调用方据此判断"读不到"）。
 2. 识图插件的取图顺序：**直链优先** → `image` 才回落到 `download_media` →
    `emotion` **不要**调 `download_media`（加密文件，只会白等 60 秒）。
-3. 直链必须走 `sticker_library.fetch_image`（公网校验 + 6MB 上限），
+3. 直链必须走 `sticker_library.fetch_image`（公网校验 + 12MB 上限），
    并用 `frames_for_vision` 归一成 PNG data URL（顺带处理动图首帧）。
 4. 状态文案：只有"确实有读不到的表情/图片"才写"部分缺失"，不得因为存在表情就一律报缺失。
 
@@ -1314,7 +1314,7 @@ temperature: only 1 is allowed for this model`。历史上正是"丢掉响应体
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
 | GET | `/api/stickers?q=&page=` | 每页 12 条；返回 `items[{id,label,description,uses,thumbnail(base64 PNG),width,height,animated}]`、`total`、`pages`、`page`、`collecting` |
-| POST | `/api/stickers/import` | 体 `{items:[{name,label,path}]}`；1–20 张、单张 ≤6MB、单次 ≤64MB；**路径必须落在 `data/plugin_uploads/sticker_admin` 内**；先逐张解码校验再统一入库（坏图整批拒绝） |
+| POST | `/api/stickers/import` | 体 `{items:[{name,label,path}]}`；1–20 张、单张 ≤12MB、单次 ≤64MB；**路径必须落在 `data/plugin_uploads/sticker_admin` 内**；先逐张解码校验再统一入库（坏图整批拒绝） |
 | POST | `/api/stickers/{id}` | 体 `{label,description}`；标签 1–40 字且不含 `[]\|` 与换行，说明 ≤1000 字，标签不可重复 |
 | POST | `/api/stickers/{id}/recognize` | 用 `image_understanding.visionModel`（留空则 deepseek 端点用 `deepseek-flash`，否则跟随聊天模型）识别，**只改说明不动标签**；失败时保留原说明 |
 | DELETE | `/api/stickers/{id}` | 只删本地收藏的文件与索引 |

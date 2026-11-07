@@ -296,6 +296,13 @@ class StickerLibrary:
         label = self.validate_label(label or ('收集_' + digest[:10]))
         if any(item.get('label') == label for item in self._entries.values()):
             label = f'{label}_{digest[:10]}'[:40]
+        # 单张就超过整个库的容量上限时必须当场拒绝：放进去也一定会被淘汰，
+        # 而淘汰掉自己就等于把整个收藏夹清空，用户看到的是「存一张图，全没了」。
+        cap = self._cap_bytes(max_mb)
+        if len(data) > cap:
+            raise ValueError(
+                f'这张图 {len(data) / 1024 / 1024:.1f}MB 比表情库容量上限 '
+                f'{cap // 1024 // 1024}MB 还大，先把容量调大或换一张小一点的图')
         target = self.images / f"{digest}.{info['ext']}"
         temporary = target.with_suffix(target.suffix + '.tmp')
         try:
@@ -317,32 +324,52 @@ class StickerLibrary:
             entry.update(annotation_source='chat', annotation_updated=now)
         entries = dict(self._entries)
         entries[digest] = entry
-        entries = self._evict(entries, max_items=max_items, max_mb=max_mb)
+        entries, victims = self._evict(entries, max_items=max_items, max_mb=max_mb, keep=digest)
         try:
             self._save(entries)
         except OSError:
             # 索引没写成 → 刚落的图也要撤掉，否则留下永远引用不到的孤儿文件。
+            # 此时淘汰名单里那些旧图一个都还没删、索引也没变，库保持原样。
             try:
                 target.unlink()
             except OSError:
                 pass
             raise
         self._entries = entries
-        return self.get(digest), True
-
-    def _evict(self, entries: Dict[str, dict], max_items=None, max_mb=None) -> Dict[str, dict]:
-        """超出数量/容量时按 (最近使用, 创建时间) 淘汰 —— 越久没用越先走。"""
-        limit = max(10, int(max_items or self.max_items))
-        cap = max(6, int(max_mb or self.max_mb)) * 1024 * 1024
-        while len(entries) > limit or sum(int(i.get('bytes') or 0) for i in entries.values()) > cap:
-            victim = min(entries.values(),
-                         key=lambda i: (float(i.get('last_used') or 0), float(i.get('created') or 0)))
-            entries = {k: v for k, v in entries.items() if k != victim.get('id')}
+        # 索引已经落盘，这时才删淘汰掉的图：反过来做，索引写失败就会留下
+        # 「索引里有、磁盘上没有」的条目，重启后点开或发送直接 FileNotFoundError。
+        for victim in victims:
             try:
                 (self.images / f"{victim.get('id')}.{victim.get('ext', 'png')}").unlink()
             except OSError:
                 pass
-        return entries
+        return self.get(digest), True
+
+    def _cap_bytes(self, max_mb=None) -> int:
+        """表情库容量上限（字节）。put 的提前拒绝与 _evict 的淘汰判定必须用同一个算法。"""
+        return max(6, int(max_mb or self.max_mb)) * 1024 * 1024
+
+    def _evict(self, entries: Dict[str, dict], max_items=None, max_mb=None,
+               keep=None) -> Tuple[Dict[str, dict], List[dict]]:
+        """算出超限时要淘汰哪些条目 —— 只挑不删，返回 (保留的 entries, victims)。
+
+        这里绝不动磁盘上的文件：删文件必须由调用方在索引写成功之后做。反过来做，
+        索引写失败会让磁盘上的条目指向一张已经不存在的图（重启后点开就 FileNotFoundError）。
+        ``keep`` 是刚入库那条的 id：它是本次操作的主角，不能被自己挤掉。
+        """
+        limit = max(10, int(max_items or self.max_items))
+        cap = self._cap_bytes(max_mb)
+        victims: List[dict] = []
+        while len(entries) > limit or sum(int(i.get('bytes') or 0) for i in entries.values()) > cap:
+            candidates = [i for i in entries.values() if i.get('id') != keep]
+            if not candidates:
+                # 只剩刚入库这一条还超限：留着它，总比把整个库清空好（超大图在 put 里已拒绝）。
+                break
+            victim = min(candidates,
+                         key=lambda i: (float(i.get('last_used') or 0), float(i.get('created') or 0)))
+            entries = {k: v for k, v in entries.items() if k != victim.get('id')}
+            victims.append(victim)
+        return entries, victims
 
     def update(self, key: str, label, description, *, tags=None) -> dict:
         self.path(key)
