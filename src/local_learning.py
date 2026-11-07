@@ -34,6 +34,29 @@ def meaningful_text(text):
     return letters >= 8 and len(raw) >= 8
 
 
+# 表达自动批准的长度区间：短于 6 个字没有可学的语气，长于 32 个字是段落不是口语。
+# 上限与 _extract 入口的 len(text)>32 过滤保持一致，免得两处口径打架。
+EXPRESSION_MIN_CHARS = 6
+EXPRESSION_MAX_CHARS = 32
+URL_OR_MAIL = re.compile(r'https?://|www\.|[\w.+-]+@[\w-]+\.[\w.]+', re.I)
+
+
+def expression_quality(text):
+    """这条表达够不够格自动升为 approved —— 只挡明显不适合当例句的，判准交给复证次数。
+
+    自动批准的风险是把噪声当语气：链接、邮箱、单号一旦进了例句，回复会照着念出来。
+    所以这里只管"能不能当例句"：长度落在口语区间、没有链接邮箱、不是纯数字符号。
+    """
+    raw = str(text or '').strip()
+    if not EXPRESSION_MIN_CHARS <= len(raw) <= EXPRESSION_MAX_CHARS:
+        return False
+    if URL_OR_MAIL.search(raw):
+        return False
+    if not re.search(r'[\u4e00-\u9fff]{2,}|[A-Za-z]{8,}', raw):
+        return False
+    return meaningful_text(raw)
+
+
 # 学习库结构版本：每次改提炼规则就加一。旧机器升级后据此重新提炼一遍，
 # 避免「归档有几千条、学习库空白」这种升级后遗症（1.3.76 用户反馈的就是这个）。
 LEARN_SCHEMA_VERSION = '2'
@@ -110,12 +133,27 @@ class LocalLearning:
             settings=self._settings(runtime)
             if settings is None or settings.enabled:
                 self._extract(scope,mid,subject,text,persona,
-                              settings is None or settings.get('autoRemember',True))
+                              settings is None or settings.get('autoRemember',True),runtime)
         # 同时按时间与消息ID排序，导入乱序旧消息不能挤掉较新的上下文。
         self.db.execute('DELETE FROM learning_messages WHERE rowid IN (SELECT rowid FROM learning_messages '
             'WHERE mode=? AND account=? AND kind=? AND target=? ORDER BY created DESC,rowid DESC LIMIT -1 OFFSET ?)',scope+(self.WINDOW,))
 
-    def _extract(self,scope,mid,subject,text,persona,auto_facts=True):
+    def expression_threshold(self,runtime):
+        """表达式自动批准的门槛；0 表示关闭，而**默认就是关闭**。
+
+        默认关闭是刻意的：打开"自动学习"不等于允许机器替用户改语气，
+        tests/test_learning_156.py 钉住的正是"表达例句必须人工批准"这条既有行为。
+        显式填 2–10 才打开，且打开后仍要过 expression_quality 与复证次数两道闸。
+        """
+        settings=self._settings(runtime)
+        try:
+            value=int(settings.get('expressionApproveHits',0)) if settings is not None else 0
+        except (TypeError,ValueError):
+            return 0
+        # 下限 2 与事实一致（单条证据不算确认），上限 10 防止设成永远达不到的数字。
+        return value if 2<=value<=10 else 0
+
+    def _extract(self,scope,mid,subject,text,persona,auto_facts=True,runtime=None):
         if '\n' in text or not 3<=len(text)<=120 or '@' in text or re.search(r'https?://|[?？]|[吗么]$',text):return
         # 笑声、单字重复、纯表情这类"没有信息量"的话不该进学习库：
         # 它们会成为第一条"表达例句"，让记忆页看起来像垃圾堆（用户已经反馈过空白/无意义）。
@@ -135,15 +173,23 @@ class LocalLearning:
         if mid in evidence:return
         hits=(row[0] if row else 0)+1;evidence=(evidence+[mid])[-20:]
         status=row[2] if row else 'candidate'
-        if fact and hits>=2 and status=='candidate':status='approved'
+        # 只升级 candidate：用户显式 rejected 过的条目是**终态**，
+        # 之后同一句话再说多少遍都不能翻回 approved，否则"拒绝"等于没做。
+        if status=='candidate':
+            if fact and hits>=2:status='approved'
+            elif not fact:
+                threshold=self.expression_threshold(runtime)
+                if threshold and hits>=threshold and expression_quality(text):status='approved'
         now=time.time()
         self.db.execute('INSERT INTO learning_items VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?) '
             'ON CONFLICT(id) DO UPDATE SET hits=excluded.hits,evidence=excluded.evidence,status=excluded.status,updated=excluded.updated',
             (identity,)+scope+(subject,category,text,status,hits,json.dumps(evidence),now,now,persona))
         # 先淘汰未确认候选，保留有用条目；每个会话**每个人设**最多200条学习结果。
         # 不带 persona 时，B 人设学一条就会把 A 人设挤掉一条 —— 学习区域根本没有独立。
+        # 同状态内按 hits 再按 updated：原来只按 updated 是纯 FIFO，
+        # 一条被反复复证 20 次、两个月没更新的条目会先于刚建 hits=1 的条目被删。
         self.db.execute('DELETE FROM learning_items WHERE id IN (SELECT id FROM learning_items WHERE mode=? AND account=? AND kind=? AND target=? AND persona=? '
-            "ORDER BY (status='approved') DESC,updated DESC,id DESC LIMIT -1 OFFSET 200)",scope+(persona,))
+            "ORDER BY (status='approved') DESC,hits DESC,updated DESC,id DESC LIMIT -1 OFFSET 200)",scope+(persona,))
 
     def rebuild(self,runtime,kind,target,limit=None):
         """从本会话最近记录提炼；``limit`` 让调用方按块处理，别一次占住事件循环。"""
@@ -270,20 +316,43 @@ class LocalLearning:
         return done
 
     def overview(self, runtime, limit_rooms=50):
-        """所有会话的学习总览：让记忆页一进来就有东西看，而不是空白。"""
-        rooms = []
-        for room in (runtime.conversations.rooms(runtime) or [])[:limit_rooms]:
-            kind, target = room['kind'], room['target']
-            scope = self.scope(runtime, kind, target)
+        """所有会话的学习总览：让记忆页一进来就有东西看，而不是空白。
+
+        查询次数必须与会话数无关：原来每个房间各查一次窗口计数和一次条目分组，
+        50 个房间就是 100 次查询，记忆页一打开全耗在磁盘上。
+        这里按 (kind,target) 拼一次 IN 条件，两条聚合查询取回所有房间的数字。
+        """
+        picked = list((runtime.conversations.rooms(runtime) or [])[:limit_rooms])
+        persona = self._persona(runtime)
+        windows, groups = {}, {}
+        if picked:
+            head = self.scope(runtime, picked[0]['kind'], picked[0]['target'])[:2]
+            keys = [(room['kind'], room['target']) for room in picked]
+            match = ' OR '.join('(kind=? AND target=?)' for _ in keys)
+            args = list(head)
+            for kind, target in keys:
+                args.extend([kind, target])
+            # 聚合查询失败只让数字退化成 0，不能整页变空：列表本身还有别的信息可看。
             try:
-                window = self.db.execute('SELECT count(*) FROM learning_messages WHERE mode=? AND account=? '
-                                         'AND kind=? AND target=?', scope).fetchone()[0]
-                rows = self.db.execute('SELECT persona,category,status,count(*) FROM learning_items WHERE mode=? '
-                                       'AND account=? AND kind=? AND target=? GROUP BY persona,category,status',
-                                       scope).fetchall()
+                for kind, target, number in self.db.execute(
+                        'SELECT kind,target,count(*) FROM learning_messages WHERE mode=? AND account=? AND ('
+                        + match + ') GROUP BY kind,target', args).fetchall():
+                    windows[(kind, target)] = number
             except Exception:
-                continue
-            persona = self._persona(runtime)
+                windows = {}
+            try:
+                for kind, target, owner, category, status, number in self.db.execute(
+                        'SELECT kind,target,persona,category,status,count(*) FROM learning_items '
+                        'WHERE mode=? AND account=? AND (' + match + ') '
+                        'GROUP BY kind,target,persona,category,status', args).fetchall():
+                    groups.setdefault((kind, target), []).append((owner, category, status, number))
+            except Exception:
+                groups = {}
+        rooms = []
+        for room in picked:
+            kind, target = room['kind'], room['target']
+            window = windows.get((kind, target), 0)
+            rows = groups.get((kind, target), [])
             # 关掉人设隔离时 view 是全量，总览也必须按全量算，否则页面会出现
             # "列表里看得见、统计里 0 条"这种自相矛盾的数字。
             clause, _ = self._visibility(runtime)
@@ -357,10 +426,21 @@ class LocalLearning:
         other=self.db.execute('SELECT count(*) FROM learning_items WHERE mode=? AND account=? AND kind=? '
                               'AND target=? AND (persona IS NULL OR persona<>?)',scope+(persona,)).fetchone()[0]
         items=[dict(zip(fields,row)) for row in rows]
+        # 一次取回所有发送者的显示名再回填：原来每条一次 SELECT，
+        # 200 条就是 200 次查询。按 created 升序遍历，后写覆盖前写 = 取最新那条的名字。
+        names={}
+        subjects=[str(item['subject']) for item in items if item['subject'] is not None]
+        for start in range(0,len(subjects),400):
+            chunk=subjects[start:start+400]
+            for subject,name in self.db.execute(
+                    'SELECT subject,name FROM learning_messages WHERE mode=? AND account=? AND kind=? '
+                    'AND target=? AND subject IN ('+','.join('?'*len(chunk))+') ORDER BY created ASC',
+                    scope+tuple(chunk)).fetchall():
+                names[subject]=name
         for item in items:
             item['evidence']=json.loads(item['evidence'])
-            name=self.db.execute('SELECT name FROM learning_messages WHERE mode=? AND account=? AND kind=? AND target=? AND subject=? ORDER BY created DESC LIMIT 1',scope+(item['subject'],)).fetchone()
-            item['subject_name']=name[0] if name and name[0] else item['subject']
+            name=names.get(str(item['subject'])) if item['subject'] is not None else None
+            item['subject_name']=name if name else item['subject']
         count=self.db.execute('SELECT count(*) FROM learning_messages WHERE mode=? AND account=? AND kind=? AND target=?',scope).fetchone()[0]
         # 关闭人设隔离时 view 是全量，别人设的条目已经混在 items 里，再报"不可见"就自相矛盾。
         visible = bool(clause)

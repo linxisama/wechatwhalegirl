@@ -53,6 +53,7 @@ class ConversationMemory(PluginBase):
             'recallArchive':FieldSchema(type='bool',label='从本地聊天记录检索相关旧对话',description='自动在当前群/私聊的持久化记录中找相关原文；不跨群，不额外调用模型，不删除历史。'),
             'archiveRecallLimit':FieldSchema(type='int',label='每轮最多引用相关旧记录',min=1,max=10),
             'localLearning':FieldSchema(type='bool',label='引用本地已确认学习结果',description='同一会话与发送者的明确事实需两条独立证据，表达候选须在学习库批准。不修改人设、不额外调用模型。'),
+            'expressionApproveHits':FieldSchema(type='int',label='表达例句自动批准所需复证次数',description='默认 0（关闭）：表达例句一律人工批准。填 2–10 后，同一句话被这么多条独立消息复证、且长度与内容合格时才自动批准；被拒绝过的条目永远不会被翻回批准。',min=0,max=10),
             'manualItems':FieldSchema(type='int',label='每轮最多引用的手动记忆条数',description='默认 12。超出时保留最近修改的那几条。',min=1,max=50),
             'manualItemChars':FieldSchema(type='int',label='单条手动记忆最多引用字数',description='默认 60，超出部分以省略号截断。',min=10,max=300),
             'manualTotalChars':FieldSchema(type='int',label='手动记忆引用总字数上限',description='默认 900，超出时停止追加后面的条目。',min=100,max=4000),
@@ -60,6 +61,9 @@ class ConversationMemory(PluginBase):
                              'personaIsolation':True,'crossChatPreferences':False,'privateToGroup':False,
                              'recallArchive':True,'archiveRecallLimit':3,
                              'localLearning':True,
+        # 0 = 不自动批准表达例句。默认关闭是为了保持"表达须人工批准"的既有行为，
+        # 用户显式填 2–10 才打开（local_learning.expression_threshold 负责校验）。
+        'expressionApproveHits':0,
                              'autoPrefixes':'我喜欢\n我不喜欢\n我叫\n我的昵称是'})
 
     def validate_settings(self,settings):

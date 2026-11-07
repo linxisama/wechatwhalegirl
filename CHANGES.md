@@ -1,3 +1,13 @@
+## 1.3.95
+
+补上十项诉求里唯一没真正做过的一项：学习系统。上一版只修了学习条目的人设隔离，学习系统本身一行未动。
+
+- **表达例句永远学不到（真实功能缺陷）**（`src/local_learning.py`）：`_extract` 只给 fact 自动批准（`:176` 附近 `if fact and hits>=2`），expression 一律停在 `candidate`；而 `recall()` 只读 `status='approved'`。结果是用户打开「自动学习」后记忆页堆满候选，AI 的回复语气却毫无变化——除了手动一条条点批准，没有任何途径让表达例句生效。新增 `expressionApproveHits` 开关（默认 0 = 关，保持旧行为）：开启后 hits 达门槛且过质量门槛的候选才升 approved。质量门槛 `expression_quality()`：长度 6..32 字、无 URL/邮箱、须含 2+ 汉字或 8+ 英文字母，并复用 `meaningful_text`。**`rejected` 是终态**，被否掉的条目不会被后续观察翻回来。
+- **200 条淘汰同状态内是 FIFO**（`src/local_learning.py:191-192`）：原来 `ORDER BY (status='approved') DESC, updated DESC, id DESC`，一条被反复复证 20 次但两个月没更新的条目，会先于刚建、hits=1 的被删。改为 `hits DESC` 插在 `updated DESC` 之前。
+- **`view()` 的 N+1**（`src/local_learning.py:434-443`）：原来对每条条目单独 `SELECT name FROM learning_messages`，200 条 = 200 次查询。改为一次 `IN (...)` 查询建映射（按 400 分块避开 SQLite 999 参数上限，`ORDER BY created ASC` 后写覆盖前写取最新名字）。实测 **203 → 4 次**。
+- **`overview()` 每房间 2 次查询**（`src/local_learning.py:318-363`）：50 个房间 = 100 次查询。改为两条 `GROUP BY` 聚合。实测 **100 → 2 次**。
+- 新增 `tests/test_learning_opt1395.py` 17 例；既有 6 个学习相关模块 99 例全绿且一字节未改。
+- 全量回归 `Ran 4396 tests in 519.022s` / `FAILED (failures=2, skipped=5)`，两例均为 `tests/test_cross_machine_paths151.py` 长路径环境依赖（本机 TEMP 33 字符拼不出 >180 字符路径；把 TEMP 指到 166 字符目录后该模块 16 例全 OK）。
 ## 1.3.94
 
 上一版有 5 处实现写好但没接线（那些文件当时被划在别的子代理边界外），等于工具造了没插电。本版全部接上。

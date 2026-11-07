@@ -1,7 +1,7 @@
-# DSH_NEXT — 鲸鱼娘微信控制台 1.3.94 交接
+# DSH_NEXT — 鲸鱼娘微信控制台 1.3.95 交接
 
 仓库：D:\聊天机器人\微信机器人（**不是** D:\微信机器人）。
-HEAD：见 `git log -1`，工作树 clean。当前版本 `1.3.94`。
+HEAD：见 `git log -1`，工作树 clean。当前版本 `1.3.95`。
 
 ## 本轮已交付（1.3.90 → 1.3.93，10 个提交）
 | 提交 | 内容 |
@@ -18,6 +18,7 @@ HEAD：见 `git log -1`，工作树 clean。当前版本 `1.3.94`。
 | `b5ef45b` | DSH 连接：错误码分诊、发现缓存单飞、等待者预算与退避 |
 | `edf97f6` | 1.3.93 版本号 + 九份文档 + `交付报告-1.3.93.md` |
 | （1.3.94） | 五处接线：`record_round` 补 `plan=`、淘汰改按得分、`recall` 接 `rank()`、`build_history` 改 `continue`、`_conflicts` 写进日志；两处陈旧文档订正；`交付报告-1.3.94.md` |
+| （1.3.95） | 学习系统优化：expression 自动批准开关（`expressionApproveHits`，默认 0 关）、200 条淘汰插入 `hits DESC`、`view()` N+1 203→4、`overview()` 100→2；`交付报告-1.3.95.md` |
 
 累计 66 files changed, 6804 insertions(+), 362 deletions(-)；新增 9 个测试模块共 177 例。
 全量回归 `Ran 4380 tests in 506.425s` / `FAILED (failures=2, skipped=5)`，两例均为 `tests/test_cross_machine_paths151.py` 的长路径环境依赖（本机 TEMP 仅 33 字符），与改动无关。基线 1.3.90 为 4203 例。
