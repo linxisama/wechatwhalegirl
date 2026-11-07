@@ -140,7 +140,7 @@ COMPUTER_TEMPLATES: tuple[tuple[str, str, object, str], ...] = (
         "0x0000007B",
         "启动蓝屏 0x0000007B（无法访问系统盘）",
         lambda text, compact: _codes(
-            compact, "0x0000007b", "00000007b", "inaccessiblebootdevice"
+            compact, "0x0000007b", "0000007b", "inaccessiblebootdevice"
         ),
         "这是系统启动时无法访问系统盘。先关机断电，拔掉最近接入的U盘、"
         "移动硬盘，台式机重新插紧SATA线和电源线，M.2硬盘重新安装一次。"
@@ -316,7 +316,7 @@ def looks_like_computer_issue(content: str) -> bool:
         code in compact for code in COMPUTER_ERROR_CODES
     ):
         return True
-    if any(term in text for term in COMPUTER_STRONG_TERMS):
+    if any(term in text or term in compact for term in COMPUTER_STRONG_TERMS):
         return True
 
     has_symptom = any(term in text for term in COMPUTER_ISSUE_SYMPTOMS)

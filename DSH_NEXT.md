@@ -1,7 +1,7 @@
-# DSH_NEXT — 鲸鱼娘微信控制台 1.3.97 交接
+# DSH_NEXT — 鲸鱼娘微信控制台 1.3.98 交接
 
 仓库：D:\聊天机器人\微信机器人（**不是** D:\微信机器人）。
-HEAD：见 `git log -1`，工作树 clean。当前版本 `1.3.97`。
+HEAD：见 `git log -1`，工作树 clean。当前版本 `1.3.98`。
 
 ## 本轮已交付（1.3.90 → 1.3.93，10 个提交）
 | 提交 | 内容 |
@@ -22,8 +22,9 @@ HEAD：见 `git log -1`，工作树 clean。当前版本 `1.3.97`。
 | `f940956` | docs：七份文档补 1.3.94 与 1.3.95 两段 |
 | （1.3.96） | 人设冲突界面可见：`GET /api/personas` 增 `conflicts`（`hasattr` 兜底）、人设页 `_apply_personas` 渲染计数 + tooltip 明细；`交付报告-1.3.96.md` |
 | （1.3.97） | 名录房间数加 LRU 上限（`MemberDirectory(max_rooms=200)`，observe 重插到队尾、从队头淘汰、当前房间显式保护）；新增 `tests/test_member_directory_cap1397.py` 8 例；`交付报告-1.3.97.md` |
+| （1.3.98） | 四处审计缺陷：`computer_helper.py:143` 错码 `00000007b`→`0000007b`（0x7B 专项模板原本永远选不中）、`:319` 强信号词加查 `compact`（`INACCESSIBLE_BOOT_DEVICE` / `inaccessible boot device` 原本漏判）、`sandbox_doctor.py` 删掉两个重复且无人调用的 `_sandbox_windows`、`memory_maintenance.py` 新增 `_commit()` 让 commit 失败时回滚并按 0 报告（`maintain` 增 `persisted` 字段，`dialogue_management.py:148` 据此返回 `success: False`）；复核又查出一处回归：`evict` 的提交/回滚会连带丢掉 `ChatState.remember` 还没落盘的 INSERT，改为 `evict(commit=False)` 由 caller 唯一提交；新增 `tests/test_audit_fixes1398.py` 16 例；`交付报告-1.3.98.md` |
 
-1.3.96 全量回归：`Ran 4427 tests`（A 半 2198 + B 半 2229，`FAILED (failures=2)`），两例均为 `tests/test_cross_machine_paths151.py` 的长路径环境依赖（本机 TEMP 仅 33 字符），与改动无关；把 TEMP 指到 166 字符目录后该模块 16 例全 OK。例数基线 1.3.90 = 4203 → 1.3.95 = 4413 → 1.3.96 = 4427（+14，恰为 `test_persona_conflict_gui1396.py` 的用例数）。
+1.3.98 全量回归：`Ran 4451 tests`（三片 1462 + 1402 + 1587，567.6s，`FAILED (failures=3)`），三例均为环境/时序依赖：两例 `tests/test_cross_machine_paths151.py` 长路径（本机 TEMP 仅 33 字符，历史上一直失败），一例 `tests/test_isolated_transport1315.py::HostIntegrationTests::test_name_resolution_executes_in_guest_account_without_host_contacts` 在分片并行下抖动（单独跑该模块两次均 `Ran 42 tests` / OK）。例数基线 1.3.90 = 4203 → 1.3.96 = 4427 → 1.3.98 = 4451（+24 = 1.3.97 的 8 + 1.3.98 的 16）。
 
 ## 1.3.94 已接线（原「待接线」清单已清空）
 1. `src/wechat_app.py:2275-2276` `record_round(...)` 已补 `plan=locals().get('prompt_plan')`。

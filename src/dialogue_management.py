@@ -145,6 +145,10 @@ def add_routes(app):
         from .memory_maintenance import maintain
         async with bot.lock:
             result = await asyncio.to_thread(maintain, bot.db)
+        if not result.get("persisted", True):
+            return {"success": False,
+                    "message": "整理没有写入磁盘（数据库提交失败），本次没有改动任何记忆",
+                    **result}
         return {"success": True, "message":
                 f"合并 {result['merged']} 条近重复，清理 {result['expired']} 条过期、"
                 f"{result['dropped']} 条长期未复证的候选", **result}

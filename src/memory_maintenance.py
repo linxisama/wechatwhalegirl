@@ -70,13 +70,29 @@ def evict_score(row, now: float) -> float:
     return EVICT_W_HITS * evidence + EVICT_W_FRESH * fresh + EVICT_W_SELF * detail
 
 
+def _commit(db) -> bool:
+    """提交事务；失败就回滚并返回 False —— 不能把没落盘的改动当成已生效。"""
+    try:
+        db.commit()
+        return True
+    except Exception:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        return False
+
+
 def evict(db, maximum: int = MAX_TOTAL_ITEMS, now: float | None = None,
-          grace: float = EVICT_GRACE) -> int:
+          grace: float = EVICT_GRACE, commit: bool = True) -> int:
     """超出容量上限时淘汰得分最低的记忆，返回淘汰条数。
 
     为什么不是 FIFO：按 updated 排序删最旧的，会优先删掉"很久没提但被复证过"的
     稳定事实（口味、住址），而这些恰恰是最该长期保留的；反而留下刚被误记的一条。
     淘汰只动 confirmed/candidate 里得分最低的，superseded 交给 maintain 的 TTL 清。
+
+    commit=False 时本函数不提交也不回滚，事务交给 caller：ChatState.remember 的
+    INSERT 还没提交，这里一 rollback 就会把用户刚说的那条记忆一起丢掉。
     """
     now = time.time() if now is None else now
     try:
@@ -104,10 +120,13 @@ def evict(db, maximum: int = MAX_TOTAL_ITEMS, now: float | None = None,
             removed += 1
         except Exception:
             continue
-    try:
-        db.commit()
-    except Exception:
-        pass
+    if not commit:
+        # caller 自己持有事务（ChatState.remember 要在同一次提交里连 INSERT 一起落盘），
+        # 这里既不提交也不回滚，免得把 caller 还没提交的写入一起丢掉。
+        return removed
+    if not _commit(db):
+        # 没提交成功等于一条都没删：回滚后按 0 条报告，别让调用方以为清理过了。
+        return 0
     return removed
 
 
@@ -153,12 +172,12 @@ def maintain(db, now: float | None = None) -> dict:
             (now - CANDIDATE_TTL,)).rowcount
     except Exception:
         dropped = 0
-    try:
-        db.commit()
-    except Exception:
-        pass
+    if not _commit(db):
+        # 同上：回滚之后 merged/expired/dropped 一条都没留下，不能报非零。
+        return {"merged": 0, "expired": 0, "dropped": 0, "evicted": 0,
+                "persisted": False}
     # 整理完顺手按容量上限淘汰一次：maintain 是"用户点整理"的入口，淘汰放这里
     # 而不是每条消息都算，避免在最热的写入路径上做全表打分。
     evicted = evict(db, now=now)
     return {"merged": merged, "expired": expired, "dropped": dropped,
-            "evicted": evicted}
+            "evicted": evicted, "persisted": True}

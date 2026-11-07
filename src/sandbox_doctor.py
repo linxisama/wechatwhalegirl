@@ -198,32 +198,6 @@ def hcsdiag_info(*, runner=None):
     return {"exit": code, "lines": len(rows), "tail": _tail(text, 800)}
 
 
-def _sandbox_windows():
-    """桌面上「Windows Sandbox」窗口的数量；取不到返回 -1（非 Windows 或调用失败）。"""
-    try:
-        import ctypes
-        from ctypes import wintypes
-    except Exception:
-        return -1
-    try:
-        user32 = ctypes.windll.user32
-        titles = []
-        callback_type = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
-        def callback(hwnd, _):
-            length = user32.GetWindowTextLengthW(hwnd)
-            if length:
-                buffer = ctypes.create_unicode_buffer(length + 1)
-                user32.GetWindowTextW(hwnd, buffer, length + 1)
-                text = buffer.value.strip()
-                if text:
-                    titles.append(text)
-            return True
-        user32.EnumWindows(callback_type(callback), 0)
-        return sum(1 for title in titles if 'Sandbox' in title or '沙盒' in title)
-    except Exception:
-        return -1
-
-
 def _probe_root():
     """探测目录必须是纯 ASCII：.wsb 的命令行里有中文路径时沙盒会静默不执行。"""
     for base in (os.environ.get("PUBLIC"), r"C:\Users\Public"):
@@ -300,11 +274,6 @@ def _sandbox_handles():
     except Exception:
         return []
     return handles
-
-
-def _sandbox_windows():
-    """沙盒窗口数量；用来判断探测到底有没有把沙盒拉起来。"""
-    return len(_sandbox_handles())
 
 
 def close_sandbox_windows(handles, limit=4):

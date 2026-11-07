@@ -1,3 +1,15 @@
+## 1.3.98
+
+四处审计出来的真实缺陷：一个错码模板永远选不中、一处强信号词只查原串导致变形写法漏判、一段重复定义且无人调用的死代码、以及落盘失败被静默吞掉。
+
+- **0x7B 模板的错码少打一位**（`src/plugins/computer_helper.py:143`）：白名单里写的是 `"00000007b"`（7 个 0），而正确的 8 位错误码是 `0000007B`（6 个 0 + 7B）。用户输入「蓝屏代码 0000007b 进不去系统」时 `_codes()` 匹配不到这个模板，`pick_templates` 一路落到「通用兜底」，本该给出的 `bootrec /fixmbr`、`/fixboot`、`/rebuildbcd` 那套命令一条都出不来。同文件 `:155` / `:164-166` / `:175-177` 三个模板写法都是对的，作为对照未动。
+- **强信号词只查原串，不查紧凑串**（`src/plugins/computer_helper.py:319`）：`COMPUTER_STRONG_TERMS` 里是 `inaccessiblebootdevice` / `bootmgr` 这种无分隔符写法，而用户实际写的是「inaccessible boot device」或「INACCESSIBLE_BOOT_DEVICE」，原串包含匹配自然失败。`compact` 在 `:314` 已经算好了，判定改为 `term in text or term in compact` 直接复用，不重复 `re.sub`、不动词表。改完「内存怎么这么贵」「他唱歌没声音的」这类闲聊仍然判 False。
+- **`_sandbox_windows` 定义两遍且无人调用**（`src/sandbox_doctor.py`）：`:201-224` 一版用 `EnumWindows` 数标题、不看 `IsWindowVisible`、取不到返回 -1，`:305-307` 又一版直接 `return len(_sandbox_handles())`；后定义覆盖前定义，第一版整段不可达。而两版都没有调用方——`probe_launch` 用的是 `_sandbox_handles()` 自己算 fresh 句柄（`:311` / `:327`）。两个 def 连同 docstring 一起删掉，两个顶层函数之间保留 2 个空行；`_sandbox_handles`（`:253`）与 `close_sandbox_windows`（`:279`）未动。
+- **提交失败被 `except Exception: pass` 吞掉**（`src/memory_maintenance.py`）：`evict` 与 `maintain` 尾部原本都是裸 `try: db.commit() except: pass`。落盘失败时 `evict` 照样 `return removed`、`maintain` 照样返回非零计数，界面显示「合并 N 条近重复」而实际一条都没写进磁盘；失败事务还留在连接上没回滚。新增 `_commit(db)`（`:73`）：成功返回 True，失败先 `rollback()` 再返回 False。`evict` 失败按 0 条报（`:127-129`），`maintain` 失败返回四个 0 加 `persisted: False`（`:175-178`），成功时补 `persisted: True`（`:183`）。
+- **提交权归 caller，避免回滚连带丢掉刚写的记忆**（`src/memory_maintenance.py:86` / `src/chat_state.py:121`）：`evict` 新增 `commit: bool = True`。`ChatState.remember` 是在同一个事务里先 INSERT（`src/chat_state.py:100-102`）、再调 `evict`、最后才自己 `commit()`（`:122`）；`evict` 若在中间提交或回滚，都会波及那条还没落盘的 INSERT——第一版实现里 `_commit` 失败即 `rollback()`，实测会让用户刚说的记忆凭空消失、`remember` 却仍返回成功的 digest。改为 `remember` 传 `commit=False`，此时 `evict` 既不提交也不回滚（`:123-126`），事务完全由 `:122` 收尾；`maintain` 内的 `evict`（`:181`）保持默认 True。
+- **界面如实显示没落盘**（`src/dialogue_management.py:148`）：`/api/dialogue/memory/maintain` 原本无条件 `success: True`，现在先看 `persisted`，为 False 就返回 `success: False` 与「整理没有写入磁盘（数据库提交失败），本次没有改动任何记忆」。GUI 侧 `src/gui/learning_panel.py:40` 对 `success=False` 本来就直显 message，无需改 GUI。
+- **测试**：新增 `tests/test_audit_fixes1398.py` 16 例（模板错码 5 例、沙盒死代码 2 例、提交失败 6 例、caller 持有事务 3 例）。与 `tests.test_memory_maintenance`、`tests.test_memory_token1392`、`tests.test_sandbox_doctor_179`、`tests.test_sandbox_doctor_180` 一起跑 `Ran 92 tests` / `OK`，既有 76 例一字节未改。
+
 ## 1.3.97
 
 修一个内存无上限：`MemberDirectory` 每个房间的成员数有上限，房间数量却从来没有。

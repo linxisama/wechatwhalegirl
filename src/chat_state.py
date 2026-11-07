@@ -116,7 +116,9 @@ class ChatState:
         # 淘汰按得分（命中/新鲜度/具体度）而不是 updated 的 FIFO：老但被反复复证的稳定事实
         # 最该长期保留，按时间删会优先杀掉它们。grace 用同一个 now，刚写的这条不会被自己淘汰。
         from .memory_maintenance import evict as _evict_memories
-        _evict_memories(self.db, max(10, min(5000, maximum)), now)
+        # 事务归 remember 自己持有（下面的 commit 才是唯一的提交点）：
+        # 让 evict 提交/回滚会把这条还没落盘的 INSERT 一起丢掉。
+        _evict_memories(self.db, max(10, min(5000, maximum)), now, commit=False)
         self.db.commit()
         return digest
 
