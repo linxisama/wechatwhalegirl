@@ -1,3 +1,22 @@
+## 1.3.95 学习系统：表达例句终于能自动批准、淘汰按命中次数、记忆页打开更快
+
+- 表达自动批准契约（新增）：`src/local_learning.py:141-154` `expression_threshold()` 只读插件设置 `expressionApproveHits`（`src/plugins/conversation_memory.py:56` FieldSchema `min=0 max=10`、`:66` 默认 `0`），`:154` `value if 2<=value<=10 else 0`——**默认 0 即关闭，填 1 也等同关闭**。升级分支在 `:182`：仅当 `status=='candidate'`、`hits>=threshold`、且 `expression_quality(text)` 通过时置 `approved`。**默认值不得改动**：`tests/test_learning_156.py:60` 已钉死「表达例句须人工批准」。
+- 例句质量契约（新增）：`src/local_learning.py:44-57` `expression_quality()` 四道闸——长度 `:39-40` 6..32 字（与 `_extract` 入口 `len(text)>32` 过滤同口径）、`:41` `URL_OR_MAIL` 不得命中、`:55` 须含 2 个以上汉字或 8 个以上英文、`:57` `meaningful_text`。任何一道都不许放宽：链接/邮箱/单号进了例句，回复会照着念出来。
+- 学习条目状态契约（修改）：`src/local_learning.py:176-178` 只在 `status=='candidate'` 时升级，`rejected` 是**终态**——后续观察不得把用户显式拒绝的条目翻回 `approved`。`recall()`（`:461`，`:465` 只读 `status='approved'`）是唯一读取口，未批准条目不得进上下文。
+- 学习条目淘汰契约（修改）：`src/local_learning.py:191-192` 排序必须是 `(status='approved') DESC,hits DESC,updated DESC,id DESC`。`hits DESC` 必须排在 `updated DESC` 之前——只按 updated 就是纯 FIFO，被反复复证 20 次但两月没更新的条目会先于 hits=1 的新条目被删。
+- 学习页查询契约（新增）：`view()`（`src/local_learning.py:418`）的会话名必须一次批量取（`:431-439`，`:433-434` 按 400 分块，SQLite 参数上限 999），`overview()`（`:318`）必须用 `:337-339` 与 `:344-347` 两条 `GROUP BY`。**不得退回逐条 SELECT**（200 条 = 203 次查询）；`persona` 隔离字段与 `others`/`pending`/`hint` 文案不得随优化改动。
+- 本批用例 `tests/test_learning_opt1395.py` 17 例；本机全量回归 `Ran 4413 tests` / `OK (skipped=5)`。
+
+## 1.3.94 五处接线收尾：分块账本落地、记忆淘汰按得分、recall 去重、历史不再被一条长消息清空、人设冲突可见
+
+- 上一版有 5 处实现写好但没接线（当时那些文件被划在多个并行子代理的边界外），等于工具造了没插电；本版全部接上。契约层面从此要求：新增工具函数必须同时交调用点，否则不算完成。
+- 用量账本契约（修改）：`src/wechat_app.py:2273-2276` 的 `record_round(...)` 必须带 `plan=locals().get('prompt_plan')`。此前 `src/token_ledger.py:248` `report()` 对真实对话一行数据都没有；删掉这个参数即违约。
+- 记忆淘汰契约（修改）：`src/chat_state.py:116-119` 必须走 `src/memory_maintenance.py:73` `evict()`，**不得退回 `DELETE ... ORDER BY updated DESC LIMIT ?`**（FIFO 会优先杀掉「很久没提但被反复复证」的稳定事实）。权重固定为 `:30-32` hits 0.5 / 新鲜度 0.3 / 具体度 0.2；`:28` `EVICT_GRACE=3600.0` 保护刚写入的记录；`:93-95` `superseded` 与 grace 内记录不进淘汰。
+- recall 去重契约（修改）：`src/chat_state.py:153-170` 必须走 `src/memory_rank.py:167` `rank()` 打分 + 阈值 + 去重。传入的 dict **必须带 `hits`/`updated`**（rank 按字段名取值，不认 tuple 列序）；返回给调用方的仍是 `id`/`content`/`status`/`evidence` 四个键，多返回键会破坏调用方。
+- 历史拼装契约（修改）：`src/chat_state.py:212-216` 超预算分支必须是 `continue`，不得改回 `break`——一条长消息会清空整段旧历史。输出顺序（`:221` 时间正序）、`included_ids`（`:222-223`）、`preserve_latest`（`:199`）三个契约不动；该函数没有 `query` 参数，不得引入相关度排序。
+- 人格冲突契约（修改）：`src/style_manager.py:275-282` `conflicts()` 必须返回只读副本；`src/wechat_app.py:814-832` `_note_persona_conflicts()` 在 `:320` `load_all()` 之后调用一次，文案 `人设冲突 N 条：<name>（自定义覆盖内置）` / `<name> 与 <other> 显示名近似`，无冲突必须一行都不写。**已知限制：只进运行日志，界面未展示**（要展示须改 `wechat_gui.py`），契约里不得写成「界面已提示」。
+- 本批用例 `tests/test_wiring1394.py` 16 例。`src/wechat_title_template.py` 仍未接线；本批未真机复测、未制作安装包（`installer/` 最新仍是 1.3.88，`发布/` 最新 1.3.31）。
+
 ## 1.3.93 自动更新自动下载、表情包预算、日志脱敏与索引、人设隔离、token 校准、人格冲突、DSH 错误码
 
 - 自动更新契约（修改）：检查到新版本后**自动下载并校验 SHA256，但绝不自动安装**——`src/update_service.py:286` `_maybe_auto_download` 起后台线程 `:307` `_auto_download_worker`，成功停在 `:427` `state='downloaded'`；安装只能由 `install()` 在 `state in ('downloaded','error')` 且 `_downloaded_path` 非空时触发。任何「发现即安装」的改动都是违约。
