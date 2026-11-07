@@ -1,3 +1,13 @@
+## 1.3.101
+
+请求体是合法 JSON 但不是对象（数组 / 字符串 / 数字 / true / null）时，两处接口 500、六处把异常类名当文案回给用户；改成一律 400 + 中文提示。
+
+- **两处 500**：`/api/persona-files/image`（`src/persona_files.py:121-127`，`:123` `body=await request.json()`，`:125` `body.get('data')`）与 `/api/management/password`（`src/wechat_app.py:3327-3334`，`:3329` 解析，`:3331` `body.get('password')`）在 `b'[1,2]'` 上抛 `AttributeError: 'list' object has no attribute 'get'`。这个类型不在 1.3.100 注册的两个 handler（`JSONDecodeError` / `UnicodeDecodeError`）里，也不是 `HTTPException`，于是逃出路由变成 500。
+- **六处把异常类名泄漏给用户**：`/api/plugins/inspect`（`:3166`）、`/api/plugins/install`（`:3177`）、`/api/plugins/batch-inspect`（`:3192`）、`/api/plugins/batch-install`（`:3205`）、`/api/plugins/inspect-local`（`:3230`）、`/api/plugins/install-local`（`:3241`）都是 `body = await request.json()` 之后直接 `body.get(...)`，`AttributeError` 落进 `except Exception as exc: raise HTTPException(400, safe_error(exc))`，最终 detail 是「操作失败（AttributeError）」——状态码对了，但用户看到的是一句只有开发者看得懂的话。
+- **为什么上一批没挡住**：`b'[1,2]'` 是**合法 JSON**，`json.loads` 成功返回 `list`，`JSONDecodeError` 根本不会被抛；而 `AttributeError` 是真正的编程错误类型，不能为它注册全局 handler——那会把代码里所有真实的 `AttributeError`（拼错属性名、对象为 None）一起吞成 400，等于让 bug 静默。
+- **修法：逐处 `isinstance(body, dict)` 判断**。`src/persona_files.py:123-127` 加 `if not isinstance(body, dict): raise HTTPException(400,'人设图片数据格式不对，请重新选择图片')`；`src/wechat_app.py:3329-3332` 加 `if not isinstance(body,dict): raise HTTPException(400,'请输入要设置的管理员密码')`；六个 plugins 路由各加 `if not isinstance(body, dict): raise HTTPException(400, '请求内容必须是 JSON 对象')`，文案逐字一致。注释只写在第一处（`/api/plugins/inspect` 上方三行），说明 `body` 可能是数组/字符串、直接 `.get` 会 `AttributeError`、而它会被 `safe_error` 包装成「操作失败（AttributeError）」泄漏类名；其余五处不重复。
+- **已经正确、本批未动**：`/api/personas`（靠 `save_persona` 抛 `ValueError` → 400「人设数据格式不对」）、`/api/management/owner`（`:3320` 已有 `isinstance` 判断）、`/api/plugins/robot_admin`（→ 400「settings must be a dict」）。`/api/mock/recv` 在 mock 后端未连接时提前 return，测不到，未改。
+- **测试**：新增 `tests/test_json_body_1401.py` 6 例——5 种非对象 JSON × 8 个路由 = 40 个组合全部 400 且无一个 500；40 个组合的 detail 都不含 `AttributeError` / `'list' object` / `NoneType`；六个 plugins 路由的 detail 逐字等于「请求内容必须是 JSON 对象」；两个原 500 路由的 detail 是各自那句中文；坏 JSON 在 8 个路由上仍是 400（1.3.100 的 handler 没被打坏）；合法对象请求不被误伤（`{'password': ''}` 与 `{'url': ''}` 都不是 500）。单独跑 `Ran 6 tests` / `OK`；与 4 个相关模块一起跑 `Ran 82 tests in 37.030s` / `OK`。
 ## 1.3.100
 
 请求体不是合法 JSON 时，17 个写接口返回 500 Internal Server Error，用户看到「服务器错误」而去翻日志；改成 400 + 中文提示。

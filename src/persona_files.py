@@ -121,6 +121,10 @@ def add_routes(app):
     @app.post('/api/persona-files/image')
     async def upload_image(request:Request):
         body=await request.json()
+        # body 也可能是数组/字符串等合法 JSON，直接 .get 会 AttributeError；
+        # 那不在下面这层 except 里，会一路变成 500。
+        if not isinstance(body, dict):
+            raise HTTPException(400,'人设图片数据格式不对，请重新选择图片')
         try:
             return {'success':True,'image':save_image(app.state.bot,body.get('data'))}
         except (ValueError,OSError,Image.DecompressionBombError) as exc:

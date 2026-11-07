@@ -3166,6 +3166,11 @@ def create_app(runtime=None):
     @app.post("/api/plugins/inspect")
     async def inspect_plugin_source(request: Request):
         body = await request.json()
+        # body 可能是数组/字符串等合法 JSON，直接 .get 会 AttributeError，
+        # 而它落进下面的 except 会被 safe_error 包装成「操作失败（AttributeError）」
+        # 把异常类名泄漏给用户；这里先挡住，给它一句人话。
+        if not isinstance(body, dict):
+            raise HTTPException(400, '请求内容必须是 JSON 对象')
         try:
             result = await asyncio.to_thread(plugin_installer.inspect_source,
                                              str(body.get("url") or ""),
@@ -3177,6 +3182,8 @@ def create_app(runtime=None):
     @app.post("/api/plugins/install")
     async def install_plugin(request: Request):
         body = await request.json()
+        if not isinstance(body, dict):
+            raise HTTPException(400, '请求内容必须是 JSON 对象')
         manager = app.state.bot.plugins
         try:
             result = await asyncio.to_thread(plugin_installer.install_from_url,
@@ -3193,6 +3200,8 @@ def create_app(runtime=None):
     async def batch_inspect_plugins(request: Request):
         """批量预检（多选/文件夹/拖拽）：只读，不写盘。"""
         body = await request.json()
+        if not isinstance(body, dict):
+            raise HTTPException(400, '请求内容必须是 JSON 对象')
         from .plugin_batch import preview
         manager = app.state.bot.plugins
         try:
@@ -3206,6 +3215,8 @@ def create_app(runtime=None):
     async def batch_install_plugins(request: Request):
         """批量安装：全部写完只重载一次，加载失败的回滚。"""
         body = await request.json()
+        if not isinstance(body, dict):
+            raise HTTPException(400, '请求内容必须是 JSON 对象')
         from .plugin_batch import install as batch_install
         manager = app.state.bot.plugins
         try:
@@ -3230,6 +3241,8 @@ def create_app(runtime=None):
     @app.post("/api/plugins/inspect-local")
     async def inspect_local_plugin(request: Request):
         body = await request.json()
+        if not isinstance(body, dict):
+            raise HTTPException(400, '请求内容必须是 JSON 对象')
         try:
             result = await asyncio.to_thread(plugin_installer.inspect_local,
                                              str(body.get("path") or ""),
@@ -3241,6 +3254,8 @@ def create_app(runtime=None):
     @app.post("/api/plugins/install-local")
     async def install_local_plugin(request: Request):
         body = await request.json()
+        if not isinstance(body, dict):
+            raise HTTPException(400, '请求内容必须是 JSON 对象')
         manager = app.state.bot.plugins
         try:
             result = await asyncio.to_thread(plugin_installer.install_from_file,
@@ -3327,6 +3342,8 @@ def create_app(runtime=None):
     @app.post('/api/management/password')
     async def management_password(request:Request):
         body=await request.json()
+        if not isinstance(body,dict):
+            raise HTTPException(400,'请输入要设置的管理员密码')
         try:
             app.state.bot.admin_sessions.set_password(body.get('password'))
             return {'success':True,'message':'密码已保存，所有管理员登录状态已失效'}
