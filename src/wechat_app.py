@@ -315,6 +315,9 @@ class WeChatRuntime:
 
         self.style = StyleManager(str(self.root / "styles"), str(self.root / "styles/custom"), None)
         self.style.load_all()
+        # 同名两份 yaml（styles/ 与 styles/custom/）时自定义那份静默覆盖内置：
+        # 冲突记录以前只写不读，用户永远不知道，这里启动时写进运行日志一次。
+        self._note_persona_conflicts()
         chosen = str(self.config.get("style.active", "") or "").strip()
         if chosen and chosen in self.style._styles:
             self.style.set_active(chosen)
@@ -807,6 +810,26 @@ class WeChatRuntime:
         if not names and not (trigger and trigger.enabled):
             names = ["鲸鱼娘", "机器人"]
         return names
+
+    def _note_persona_conflicts(self) -> None:
+        """把加载期间发现的人设冲突写进运行日志；无冲突时一行都不写。"""
+        try:
+            conflicts = self.style.conflicts()
+        except Exception:
+            return
+        if not conflicts:
+            return
+        names = []
+        for item in conflicts:
+            name = str(item.get("name") or "")
+            if item.get("kind") == "same_name":
+                # 同名冲突里后加载的是 custom，界面上看到的就是自定义那份
+                names.append(f"{name}（自定义覆盖内置）" if item.get("current") == "custom" else name)
+            elif item.get("other_name"):
+                names.append(f"{name} 与 {item.get('other_name')} 显示名近似")
+            elif name:
+                names.append(name)
+        self.note(f"人设冲突 {len(conflicts)} 条：" + "；".join(names))
 
     def note(self, text: str) -> None:
         self.events.append({"time": time.time(), "text": str(text)})
@@ -2249,7 +2272,8 @@ class WeChatRuntime:
                         from .token_ledger import record_round as _token_round
                         _token_round(self.root, message, reply,
                                      prompt_text=locals().get('system_prompt') or '',
-                                     model=str(locals().get('engine_name') or ''))
+                                     model=str(locals().get('engine_name') or ''),
+                                     plan=locals().get('prompt_plan'))
                     except Exception:
                         pass
                     if generated_reply:

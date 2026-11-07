@@ -1,3 +1,16 @@
+## 1.3.94
+
+上一版有 5 处实现写好但没接线（那些文件当时被划在别的子代理边界外），等于工具造了没插电。本版全部接上。
+
+- **分块账本落地**（`src/wechat_app.py`）：`record_round(...)` 补 `plan=locals().get('prompt_plan')`。此前 `token_ledger.report()` 对真实对话完全没有数据，只有显式传参的调用方才有。现在每轮都能读到 persona/plugins/rules/image 各占多少字。
+- **记忆淘汰从 FIFO 改为按得分**（`src/chat_state.py`）：原来 `DELETE ... ORDER BY updated DESC LIMIT ?` 会优先杀掉「很久没提但被反复复证过」的稳定事实（口味、住址），而留下刚被误记的一条。改用 `memory_maintenance.evict()`，按 hits 0.5 / 新鲜度 0.3 / 具体度 0.2 打分淘汰最低分，`superseded` 不动，`EVICT_GRACE=3600` 保护刚写入的记录。
+- **recall 接上跨条去重**（`src/chat_state.py`）：原来同一句话换个说法被记成多条时会一起召回，一条记忆占掉两个名额。改用 `memory_rank.rank()` 打分+阈值+去重，返回值仍是调用方认的四个键。
+- **build_history 不再一遇超预算就 break**（`src/chat_state.py`）：改为 `continue` 跳过这一条、继续看更早的。原来一条长消息会把整段旧历史清空，而更早的短轮次本来还放得下。输出顺序（时间正序）、`included_ids`、`preserve_latest` 三个契约未动。
+- **人设冲突可见**（`src/style_manager.py` + `src/wechat_app.py`）：`_conflicts` 以前只写不读，`styles/` 与 `styles/custom/` 同名时自定义那份静默覆盖内置，用户永远不知道。新增 `StyleManager.conflicts()` 只读副本，启动加载完人设后写一行运行日志：`人设冲突 1 条：tsundere_whale_girl（自定义覆盖内置）`。无冲突时不写。
+- 文档：`diy-src/03-常见改造任务.md`、`diy-src/04-已知限制.md` 两处「（只提示发现新版本，不自动下载安装）」改为「（1.3.93 起自动下载并校验，但仍不自动安装）」。
+- 新增 `tests/test_wiring1394.py` 16 例。
+
+全量回归 `Ran 4396 tests in 519.022s`，`FAILED (failures=2, skipped=5)`——两例均为 `tests/test_cross_machine_paths151.py` 的 TEMP 路径长度依赖：把 `TEMP` 指到 166 字符的目录后该文件 16 例全过，证明与本版改动无关。
 ## 1.3.93 自动更新自动下载、表情包段落独立预算、日志脱敏与索引、人设隔离、token 估算校准、人格冲突留痕、DSH 错误码
 
 - 本段合并三个批次：`d334b26`（1.3.91 自动更新）、`b1c3fe6`（1.3.92 表情包预算）与 `cc31fda`/`4e1278c`/`bd8bef6`/`7cf6b5c`/`79b5986`/`b5ef45b`（1.3.93）。1.3.91、1.3.92 当时只提交了代码、没单独成段，`APP_VERSION` 从 `1.3.90` 直接到 `1.3.93`（`src/runtime_identity.py:5`）。

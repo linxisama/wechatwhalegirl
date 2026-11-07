@@ -272,6 +272,14 @@ class StyleManager:
         self._conflicts = [item for item in self._conflicts
                            if name not in (item.get("name"), item.get("other_name"))]
 
+    def conflicts(self) -> list[dict]:
+        """加载期间发现的同名/近似名冲突（只读副本，改它不影响内部记录）。
+
+        以前 _conflicts 只写不读，styles/ 与 styles/custom/ 同名时用户永远不知道
+        自定义那份覆盖了内置；宿主启动时读一次写进运行日志。
+        """
+        return [dict(item) for item in self._conflicts]
+
     def get(self, name: str | None = None) -> ChatStyle:
         """获取指定风格，不存在则返回默认风格"""
         target = self._locked_name or name or self._active

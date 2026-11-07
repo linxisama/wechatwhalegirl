@@ -113,8 +113,10 @@ class ChatState:
                                     (now, other_id))
         except Exception:
             pass
-        self.db.execute('DELETE FROM chat_memories WHERE id NOT IN (SELECT id FROM chat_memories ORDER BY updated DESC LIMIT ?)',
-                        (max(10, min(5000, maximum)),))
+        # 淘汰按得分（命中/新鲜度/具体度）而不是 updated 的 FIFO：老但被反复复证的稳定事实
+        # 最该长期保留，按时间删会优先杀掉它们。grace 用同一个 now，刚写的这条不会被自己淘汰。
+        from .memory_maintenance import evict as _evict_memories
+        _evict_memories(self.db, max(10, min(5000, maximum)), now)
         self.db.commit()
         return digest
 
@@ -149,21 +151,20 @@ class ChatState:
             pass
 
     def recall(self, scope, subject, query='', limit=5, candidates=False):
-        from .memory_rank import score as rank_score
+        from .memory_rank import rank as rank_memories
         rows = self.db.execute('SELECT id,content,status,hits,updated FROM chat_memories WHERE scope=? '
                                'AND subject=? AND status=? ORDER BY updated DESC LIMIT 300',
                                (scope, subject, 'candidate' if candidates else 'confirmed')).fetchall()
         query = str(query or '').strip()
         now = time.time()
-        scored = []
-        for index, row in enumerate(rows):
-            value = rank_score(query, row[1], row[4], row[3], now)
-            # 有明确问题却完全不像的记忆直接丢掉，避免把无关旧事塞进提示词。
-            if query and value < 0.10:
-                continue
-            scored.append((value, -index, {'id': row[0], 'content': row[1],
-                                           'status': row[2], 'evidence': row[3]}))
-        return [item[2] for item in sorted(scored, key=lambda item: item[:2], reverse=True)[:limit]]
+        # 交给 memory_rank.rank 打分/阈值/去重：同一句话换个说法被记成多条时只留一条，
+        # 否则一条记忆占掉两个名额。rank 靠 content/updated/hits 算分，所以内部多带两列；
+        # 返回值仍是调用方认的四个键。
+        items = [{'id': row[0], 'content': row[1], 'status': row[2], 'evidence': row[3],
+                  'hits': row[3], 'updated': row[4]} for row in rows]
+        kept, _stats = rank_memories(items, query, now, limit=limit)
+        return [{'id': item['id'], 'content': item['content'],
+                 'status': item['status'], 'evidence': item['evidence']} for item in kept]
 
     def forget(self, scope, subject, query):
         if not query:
@@ -210,7 +211,9 @@ def build_history(rows, fingerprint, max_chars=6000, renderer=None, reply_render
         cost = len(user) + len(reply)
         if used + cost > max_chars:
             if not preserve_latest or result or max_chars < 80:
-                break
+                # 跳过这一条、继续看更早的：直接 break 等于"只砍最旧"，一条长消息
+                # 会把整段旧历史清空，而更早的短轮次本来还放得下。
+                continue
             from .dialogue_context import recent_turns
             pair = recent_turns([{'role':'user','content':user},{'role':'assistant','content':reply}],1,max_chars)
             user,reply = pair[0]['content'],pair[1]['content']
