@@ -25,7 +25,7 @@ from src.plugins import PluginBase  # noqa: E402
 
 PACK_VERSION = "1.0.0"
 AUTHOR = "鲸鱼娘"
-API_VERSION = "1"
+API_VERSION = 2
 # 插件包要求的最低宿主版本：比当前版本低一档，避免每次升版都要重发种子包
 REQUIRES = "1.3.0"
 HOOK_ATTRS = ("prepare", "tick", "ready", "describe", "generate")
@@ -41,13 +41,30 @@ def find_plugin_class(pack_id: str):
     raise RuntimeError("模块 src.plugins." + pack_id + " 里没有找到插件类")
 
 
-def capabilities_of(cls) -> list:
-    """插件自己重写了哪些钩子，作为 capabilities 写进清单（只用于展示）。"""
+# 一个钩子都不实现的包也是合法的，但必须说清自己是哪一类（见
+# src/plugin_packs.py 的 CAPABILITY_KINDS）。空 capabilities 在严格档下会被判非法，
+# 所以生成器必须替这类包补上正确的种类，而不是留空。
+NON_HOOK_CAPABILITIES = {
+    "sticker_admin": "settings",   # 纯设置门：只是藏起管理入口，不参与链路
+    "sticker_memory": "helper",    # 纯工具库：导出指纹函数给别的模块调用
+}
+
+
+def capabilities_of(pack_id: str, cls) -> list:
+    """插件自己重写了哪些钩子，作为 capabilities 写进清单。
+
+    钩子一个都没有时，退回 NON_HOOK_CAPABILITIES 里登记的种类；
+    仍然没有就返回空列表（严格档下会被判非法，这是**故意的**：
+    说不清自己提供什么能力的包，用户没法判断要不要装）。
+    """
     names = []
     for name, value in vars(cls).items():
         if name.startswith("on_") or name in HOOK_ATTRS:
             if callable(value) or isinstance(value, (staticmethod, classmethod)):
                 names.append(name)
+    if not names:
+        kind = NON_HOOK_CAPABILITIES.get(pack_id)
+        return [kind] if kind else []
     return sorted(names)
 
 
@@ -67,7 +84,7 @@ def manifest_of(pack_id: str, cls) -> dict:
         "native": "纯 Python，不依赖外部程序",
         "side": "本机侧运行",
         "upstream": "随控制台源码分发（plugin-packs 种子包）",
-        "capabilities": capabilities_of(cls),
+        "capabilities": capabilities_of(pack_id, cls),
     }
 
 

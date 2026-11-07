@@ -2,6 +2,10 @@
 
 夹具是真机截下来的标题墨迹（.tmp-ink*.png，仓库根目录），不是合成的：
 合成图只能证明算法自洽，真机图才能证明它在反锯齿、缩放、字重不一致时还认得出。
+
+这三个文件**不进版本控制**（.gitignore 的 .tmp-* 规则），所以克隆出来的仓库里没有它们。
+依赖真机图的用例在夹具缺失时 skip 并写明原因，而不是伪造一张合成图冒充真机图 ——
+那样测试会一直绿，但什么都没证明。要跑完整回归，把这三张图放回仓库根目录即可。
 """
 import os
 import random
@@ -23,6 +27,21 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 FIXTURE_192 = os.path.join(REPO_ROOT, '.tmp-ink192.png')      # 真值 'bilibili粉丝'
 FIXTURE_191 = os.path.join(REPO_ROOT, '.tmp-ink-191.png')     # 真值 '李清浩'
 FIXTURE_190B = os.path.join(REPO_ROOT, '.tmp-ink-190b.png')   # 真值 '摆鑫学长'
+
+FIXTURE_MISSING_REASON = (
+    '真机标题墨迹夹具不在仓库里（.tmp-ink*.png 被 .gitignore 的 .tmp-* 规则排除，'
+    '从未提交）。把这三张图放回仓库根目录即可运行本组用例。')
+
+
+def require_fixture(*paths):
+    """真机图缺失时 skip，而不是让用例报 FileNotFoundError。
+
+    为什么不是 setUp 里统一 skip：同一模块里还有大量不依赖真机图的用例
+    （合成图渲染、剪枝、排序），它们必须照常跑。只有真正读图的用例才 skip。
+    """
+    missing = [os.path.basename(path) for path in paths if not os.path.isfile(path)]
+    if missing:
+        raise unittest.SkipTest(FIXTURE_MISSING_REASON + ' 缺少：' + '、'.join(missing))
 
 
 def load(path):
@@ -100,6 +119,7 @@ class RankTest(unittest.TestCase):
     """A1(c)(d)(f)：空输入、合成 18px 标题图、宽高比剪枝。"""
 
     def test_empty_names_returns_empty(self):
+        require_fixture(FIXTURE_191)
         self.assertEqual(rank(load(FIXTURE_191), []), [])
         self.assertEqual(rank(load(FIXTURE_191), ()), [])
 
@@ -118,6 +138,7 @@ class RankTest(unittest.TestCase):
         self.assertGreaterEqual(scores[0][0] - scores[1][0], MIN_MARGIN)
 
     def test_aspect_pruning_rejects_very_wide_name(self):
+        require_fixture(FIXTURE_191)
         image = load(FIXTURE_191)
         ink_mask, ink_size = ink_box(image)
         wide = '一' * 40
@@ -129,6 +150,7 @@ class RankTest(unittest.TestCase):
         self.assertEqual(rank(image, [wide, '李清浩'])[0][1], '李清浩')
 
     def test_tolerance_is_applied(self):
+        require_fixture(FIXTURE_191)
         image = load(FIXTURE_191)
         ink_mask, ink_size = ink_box(image)
         template = render_template('李清浩')
@@ -140,6 +162,7 @@ class JudgeTest(unittest.TestCase):
     """A1(e)：judge() 的五个 reason 分支各一例。"""
 
     def test_accepted(self):
+        require_fixture(FIXTURE_190B)
         verdict = judge(load(FIXTURE_190B), '摆鑫学长', ['摆鑫学长', '摆鑫学', '李'])
         self.assertEqual(set(verdict), {'accepted', 'mine', 'best_rival', 'rival', 'margin', 'reason'})
         self.assertTrue(verdict['accepted'])
@@ -148,6 +171,7 @@ class JudgeTest(unittest.TestCase):
         self.assertGreaterEqual(verdict['margin'], MIN_MARGIN)
 
     def test_below_threshold(self):
+        require_fixture(FIXTURE_190B)
         # 渲染得出、但形状对不上：分数低于接受线，先修的是模板本身。
         verdict = judge(load(FIXTURE_190B), '摆鑫学', ['摆鑫学', '李'])
         self.assertFalse(verdict['accepted'])
@@ -155,6 +179,7 @@ class JudgeTest(unittest.TestCase):
         self.assertLess(verdict['mine'], MIN_SCORE)
 
     def test_margin_too_small(self):
+        require_fixture(FIXTURE_190B)
         # 池里有一个与 mine 渲染完全同形的名字（尾随空格不产生墨迹），领先幅度为 0。
         verdict = judge(load(FIXTURE_191), '李清浩', ['李清浩', '李清浩 '])
         self.assertFalse(verdict['accepted'])
@@ -163,6 +188,7 @@ class JudgeTest(unittest.TestCase):
         self.assertLess(verdict['margin'], MIN_MARGIN)
 
     def test_not_in_pool(self):
+        require_fixture(FIXTURE_191)
         verdict = judge(load(FIXTURE_191), '李清浩', ['摆鑫学长'])
         self.assertFalse(verdict['accepted'])
         self.assertEqual(verdict['reason'], 'not_in_pool')
@@ -191,6 +217,7 @@ class RealFixtureRegressionTest(unittest.TestCase):
         return scores
 
     def test_fixture_bilibili(self):
+        require_fixture(FIXTURE_192)
         # 池里放的是 OCR 读出来的邻形 'bilibli粉丝'（少一个 i），真值 'bilibili粉丝'
         # 反而不在池里：这帧验的是「按形状能把 OCR 的错字挑出来」，不是认出原名。
         pool = ['bilibli粉丝', 'bilibili粉丝', 'bilibli 粉丝', 'bilibiIi粉丝']
@@ -199,11 +226,13 @@ class RealFixtureRegressionTest(unittest.TestCase):
         self.assertGreaterEqual(scores[0][0] - scores[1][0], MIN_MARGIN)
 
     def test_fixture_liqinghao(self):
+        require_fixture(FIXTURE_191)
         pool = ['李清浩', '李清浩。', '李清浩2', '李消浩']
         scores = self.check(FIXTURE_191, '李清浩', pool)
         self.assertGreaterEqual(scores[0][0], MIN_SCORE)
 
     def test_fixture_baixin(self):
+        require_fixture(FIXTURE_190B)
         pool = ['摆鑫学长', '摆鑫学', '摆鑫学长。', '摆鑫学艮']
         scores = self.check(FIXTURE_190B, '摆鑫学长', pool)
         self.assertGreaterEqual(scores[0][0], MIN_SCORE)
@@ -213,6 +242,7 @@ class PrefilterTest(unittest.TestCase):
     """渲染前的 getbbox 粗筛只能放宽、不能改分：剪掉的名字本来就该是 0 分。"""
 
     def test_prefilter_does_not_change_any_score(self):
+        require_fixture(FIXTURE_192, FIXTURE_191, FIXTURE_190B)
         pool = fake_pool(5600)[::7]      # 均匀抽样，覆盖各种长度与宽高比
         self.assertGreater(len(pool), 700)
         for fixture in (FIXTURE_192, FIXTURE_191, FIXTURE_190B):
@@ -231,6 +261,7 @@ class PrefilterTest(unittest.TestCase):
                                            msg='%s 的得分被粗筛改掉了' % name)
 
     def test_prefilter_keeps_every_name_the_exact_prune_keeps(self):
+        require_fixture(FIXTURE_192, FIXTURE_191, FIXTURE_190B)
         pool = fake_pool(5600)[::7]
         for fixture in (FIXTURE_192, FIXTURE_191, FIXTURE_190B):
             with self.subTest(fixture=os.path.basename(fixture)):
@@ -256,6 +287,7 @@ class PerformanceTest(unittest.TestCase):
     """A3：5600 个候选名的耗时上限 3.0 秒。"""
 
     def test_rank_5600_names_under_three_seconds(self):
+        require_fixture(FIXTURE_190B)
         names = fake_pool(5600)
         self.assertEqual(len(names), 5600)
         image = load(FIXTURE_190B)
@@ -277,6 +309,7 @@ class PoolScaleTest(unittest.TestCase):
     """全池规模下的行为：5600 个真名里可能有与真值同形的邻形名，会把领先幅度吃掉。"""
 
     def test_true_name_wins_against_5600_names(self):
+        require_fixture(FIXTURE_192, FIXTURE_191, FIXTURE_190B)
         names = fake_pool(5600)
         cases = ((FIXTURE_192, 'bilibli粉丝'), (FIXTURE_191, '李清浩'),
                  (FIXTURE_190B, '摆鑫学长'))

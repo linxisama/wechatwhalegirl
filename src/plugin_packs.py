@@ -50,7 +50,33 @@ PACK_MODULE_PREFIX = "whale_pack_"
 ENV_FROM_PACKS = "WHALE_PLUGINS_FROM_PACKS"
 # 与 src/plugin_manifest.SUPPORTED_API_VERSIONS 对齐；那边服务单文件插件，这边
 # 服务插件包，两个模块刻意不互相 import，避免清单语义互相绑死。
-SUPPORTED_API_VERSIONS: Tuple[str, ...] = ("1",)
+#
+# 1.3.103：改成整数集合。社区写法本来就是 {"api_version": 1}（JSON 整数），
+# 旧实现用字符串成员测试，整数直接被判「必须是文本」—— 这是把方言差异当成错误。
+SUPPORTED_API_VERSIONS: Tuple[int, ...] = (1, 2)
+
+# api_version 2 起是严格档：下面 13 个字段一个都不能缺。
+# api_version 1（或干脆不写）走兼容档：只有 id/name/version 判死，其余降级成提示，
+# 否则已装的三方包会在升级当天集体失效。
+STRICT_API_VERSION = 2
+
+# capabilities 的合法取值。前一组是钩子（插件在链路某一步被调用），
+# 后一组是非钩子能力 —— 有些插件一个钩子都不实现也完全合法：
+#   settings = 纯设置门（例如 sticker_admin 只是藏起管理入口）
+#   helper   = 纯工具库（例如 sticker_memory 只导出指纹函数给别的模块用）
+# 但**空列表不行**：说不清自己提供什么能力的包，用户没法判断要不要装。
+CAPABILITY_HOOKS: Tuple[str, ...] = (
+    "on_observed", "on_ingest", "on_block", "on_pre_ai", "on_prepare",
+    "on_sent", "on_post_reply", "tick", "describe", "generate",
+)
+CAPABILITY_KINDS: Tuple[str, ...] = ("settings", "helper")
+CAPABILITY_VOCABULARY: Tuple[str, ...] = CAPABILITY_HOOKS + CAPABILITY_KINDS
+
+STRICT_REQUIRED_FIELDS: Tuple[str, ...] = (
+    "id", "name", "version", "entry", "author", "description",
+    "api_version", "requires", "data_policy", "native", "side",
+    "upstream", "capabilities",
+)
 PACK_ID_RE = re.compile(r"^[a-z][a-z0-9_]{1,47}$")
 _REMOVE_ID_RE = re.compile(r"^[a-z0-9_]+$")
 _VERSION_RE = re.compile(r"^(\d{1,6})(?:\.(\d{1,6}))?(?:\.(\d{1,6}))?$")
@@ -122,6 +148,30 @@ def _safe_rel_path(value: str) -> Optional[str]:
     if not parts or any(part == ".." for part in parts):
         return None
     return "/".join(parts)
+
+
+def normalize_api_version(value: Any) -> Optional[int]:
+    """把清单里的 api_version 归一成整数；认不出来返回 None。
+
+    接受 1 / "1" / 1.0（整数等值的浮点），拒绝 "1.0" / 1.5 / True / None。
+    为什么这么宽：JSON 里写 1 和 "1" 是同一件事的两种方言，社区两种都在用；
+    而 "1.0" 是版本号不是整数版本，放它进来等于把两套语义混成一个。
+    """
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value) if value.is_integer() else None
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        try:
+            return int(text, 10)
+        except ValueError:
+            return None
+    return None
 
 
 def _error_text(exc: BaseException) -> str:
@@ -215,6 +265,7 @@ def _check_manifest(data: Any, host_version: str, pack_dir: Optional[Path] = Non
         else:
             meta["capabilities"] = [item.strip() for item in raw_caps if item.strip()]
 
+
     # 降级提示：缺这些字段不影响加载，但界面要能说清「缺什么、会怎样」
     if not meta.get("author"):
         warnings.append("未填写 author：界面会显示「未知作者」")
@@ -231,16 +282,40 @@ def _check_manifest(data: Any, host_version: str, pack_dir: Optional[Path] = Non
     if not meta.get("side"):
         warnings.append("未声明 side：默认按「本机侧运行」处理")
 
-    # api_version
+    # api_version：归一成整数（1.3.103）
     raw_api = data.get("api_version", SUPPORTED_API_VERSIONS[0])
-    if not isinstance(raw_api, str) or not raw_api.strip():
-        errors.append("字段 api_version 必须是文本（例如 1）")
+    api_version = normalize_api_version(raw_api)
+    if api_version is None:
+        errors.append("字段 api_version 必须是整数（例如 1），收到 " + repr(raw_api))
     else:
-        meta["api_version"] = raw_api.strip()
-        if raw_api.strip() not in SUPPORTED_API_VERSIONS:
-            errors.append("插件接口版本 " + raw_api.strip() + " 与本机不兼容：本机支持 "
-                          + "/".join(SUPPORTED_API_VERSIONS))
+        meta["api_version"] = api_version
+        meta["strict"] = api_version >= STRICT_API_VERSION
+        if api_version not in SUPPORTED_API_VERSIONS:
+            errors.append("插件接口版本 " + str(api_version) + " 与本机不兼容：本机支持 "
+                          + "/".join(str(item) for item in SUPPORTED_API_VERSIONS))
 
+    # 严格档（api_version >= 2）：13 个字段一个都不能缺。
+    # 兼容档（api_version 1 / 未写）维持「只判死 id/name/version，其余降级成提示」，
+    # 否则升级当天已装的三方包会集体失效。
+    if meta.get("strict"):
+        for field in STRICT_REQUIRED_FIELDS:
+            if field in ("id", "name", "version", "entry", "api_version"):
+                continue  # 上面已按更具体的文案判过
+            value = data.get(field)
+            if value is None or (isinstance(value, str) and not value.strip()):
+                errors.append("严格档（api_version " + str(STRICT_API_VERSION)
+                              + "）缺少必需字段 " + field)
+        caps = meta.get("capabilities")
+        if caps is not None and not caps:
+            errors.append("严格档（api_version " + str(STRICT_API_VERSION)
+                          + "）的 capabilities 不能是空列表：至少写一个能力名（可用 "
+                          + " / ".join(CAPABILITY_VOCABULARY) + "）")
+        elif caps:
+            unknown = [item for item in caps if item not in CAPABILITY_VOCABULARY]
+            if unknown:
+                errors.append("严格档（api_version " + str(STRICT_API_VERSION)
+                              + "）的 capabilities 含未知能力：" + "、".join(unknown)
+                              + "（可用 " + " / ".join(CAPABILITY_VOCABULARY) + "）")
     # 宿主版本：requires（清单字段）与 min_host_version（PluginMeta 同义字段）取较高者
     host = parse_version(host_version)
     for field in ("requires", "min_host_version"):

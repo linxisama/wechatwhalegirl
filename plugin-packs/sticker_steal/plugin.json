@@ -5,7 +5,7 @@
   "entry": "plugin.py",
   "author": "鲸鱼娘",
   "description": "回复时顺手收集群里的表情，攒进本地图库。",
-  "api_version": "1",
+  "api_version": 2,
   "requires": "1.3.0",
   "data_policy": "只在本机读写插件自己的设置与状态，不上传聊天内容",
   "native": "纯 Python，不依赖外部程序",

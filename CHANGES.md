@@ -1,3 +1,14 @@
+## 1.3.103
+
+插件清单契约升级：`api_version` 整数化 + 严格档 13 字段。
+
+- **`api_version` 改成整数**：旧实现用字符串成员测试（`("1",)`），社区写法 `{"api_version": 1}`（JSON 整数）会被判「字段 api_version 必须是文本」直接拒绝——把方言差异当成了错误。新增 `normalize_api_version()`，接受 `1` / `"1"` / `1.0`，拒绝 `"1.0"` / `1.5` / `true` / `null`（`"1.0"` 是版本号语义，不能混进整数版本）。`SUPPORTED_API_VERSIONS` 由 `("1",)` 改为 `(1, 2)`。
+- **双档清单**：`api_version >= 2` 是严格档，`STRICT_REQUIRED_FIELDS` 里 13 个字段（`id` `name` `version` `entry` `author` `description` `api_version` `requires` `data_policy` `native` `side` `upstream` `capabilities`）缺一即判非法，文案点名缺哪个。`api_version 1` 或未写走兼容档，维持「只判死 id/name/version，其余降级成提示」，避免升级当天已装的三方包集体失效。
+- **`capabilities` 有了词表**：`CAPABILITY_VOCABULARY = CAPABILITY_HOOKS + CAPABILITY_KINDS`。钩子 10 个（`on_observed` `on_ingest` `on_block` `on_pre_ai` `on_prepare` `on_sent` `on_post_reply` `tick` `describe` `generate`），非钩子 2 个（`settings` 纯设置门 / `helper` 纯工具库）。严格档下空列表与未知能力名都判非法——`sticker_admin` 一个钩子都不实现（只是藏起管理入口）、`sticker_memory` 是纯工具库（导出指纹函数），它们必须声明 `settings` / `helper` 而不是留空。
+- **10 个种子包全部升到严格档**：`api_version: 2`（整数），`capabilities` 按真实实现填（`group_ambient` `[tick]`、`group_summary` `[generate,on_ingest]`、`image_library` `[on_ingest,on_post_reply,on_pre_ai,on_sent]`、`member_aliases` `[on_ingest,on_pre_ai]`、`reply_pace` `[on_pre_ai]`、`sticker_admin` `[settings]`、`sticker_memory` `[helper]`、`sticker_steal` `[on_ingest,on_observed,on_prepare,tick]`、`web_context` `[on_pre_ai]`、`web_lookup` `[on_pre_ai,on_prepare]`）。`tools/make_plugin_packs.py` 同步：`API_VERSION = 2`，`capabilities_of(pack_id, cls)` 在无钩子时按 `NON_HOOK_CAPABILITIES` 补种类。
+- **新增 `docs/插件契约改造规格-1.3.103起.md`**：把用户的判定标准（后来加的 / 有清单能单独装卸 / 不靠改原版内部活着）与十条逐项现状写成后续六批的共同底稿。
+- **`tests/test_title_template190.py` 夹具缺失改为显式 skip**：`.tmp-ink192.png` / `.tmp-ink-191.png` / `.tmp-ink-190b.png` 是真机截下的标题墨迹夹具（真值分别是 `bilibili粉丝` / `李清浩` / `摆鑫学长`），它们被 `.gitignore:45` 的 `.tmp-*` 规则排除、从未提交，上一轮清理磁盘时被当成垃圾删掉，导致该模块 20 例 ERROR。**无法恢复**（git 历史零记录、回收站 0 项、全盘无同名文件）。改为新增 `require_fixture()` 守卫：夹具缺失时 `SkipTest` 并写明原因，14 个依赖真机图的用例 skip，其余 7 个合成图用例照常跑。修复后 `Ran 21 tests` / `OK (skipped=14)`。教训：`.tmp-*` 通配删除前必须 grep `tests/` 与 `src/` 里的文件名引用。
+- 测试：新增 `tests/test_plugin_contract_1103.py` 20 例（api_version 归一 4 例、严格档 6 例、兼容档 4 例、不兼容版本 2 例、种子包 3 例、安装拒绝 1 例）。与 12 个插件相关模块一起跑 `Ran 285 tests in 17.531s` / `OK`；全量回归 `Ran 4498 tests`（三片 1603 + 1493 + 1402），唯二非通过项为 `tests/test_cross_machine_paths151.py` 长路径（本机 TEMP 仅 33 字符，环境依赖，与本批无关），`tests/test_title_template190.py` 的 14 例因真机夹具缺失改为显式 skip。
 ## 1.3.102
 
 审计发现两处清单/状态文件不是原子写：写到一半失败会留下半截 JSON，而读取侧为了「坏了也不崩」静默回落到空清单或默认状态 —— 用户装的插件从界面消失、插件状态被重置，全程没有任何报错。

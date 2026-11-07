@@ -5,7 +5,7 @@
   "entry": "plugin.py",
   "author": "鲸鱼娘",
   "description": "群聊主动发言：默认关闭，需同时满足 proactive.enabled 与群白名单，风险最高。",
-  "api_version": "1",
+  "api_version": 2,
   "requires": "1.3.0",
   "data_policy": "只在本机读写插件自己的设置与状态，不上传聊天内容",
   "native": "纯 Python，不依赖外部程序",

@@ -5,11 +5,13 @@
   "entry": "plugin.py",
   "author": "鲸鱼娘",
   "description": "记住表情包的含义，回复时更容易挑对图。",
-  "api_version": "1",
+  "api_version": 2,
   "requires": "1.3.0",
   "data_policy": "只在本机读写插件自己的设置与状态，不上传聊天内容",
   "native": "纯 Python，不依赖外部程序",
   "side": "本机侧运行",
   "upstream": "随控制台源码分发（plugin-packs 种子包）",
-  "capabilities": []
+  "capabilities": [
+    "helper"
+  ]
 }

@@ -134,7 +134,8 @@ class TestManifestValidation(unittest.TestCase):
         self.assertTrue(any("依赖的插件未安装" in item for item in errors), errors)
 
     def test_api_version_incompatible(self):
-        ok, errors, meta = validate_manifest(_manifest("demo_pack", api_version="2"), HOST)
+        # 1.3.103 起 2 是受支持的严格档，不兼容要用宿主真没实现的版本号。
+        ok, errors, meta = validate_manifest(_manifest("demo_pack", api_version="3"), HOST)
         self.assertFalse(ok)
         self.assertEqual(meta["status"], "incompatible")
         self.assertTrue(any("不兼容" in item for item in errors), errors)
