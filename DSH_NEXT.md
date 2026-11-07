@@ -1,7 +1,7 @@
-# DSH_NEXT — 鲸鱼娘微信控制台 1.3.107 交接
+# DSH_NEXT — 鲸鱼娘微信控制台 1.3.108 交接
 
 仓库：D:\聊天机器人\微信机器人（**不是** D:\微信机器人）。
-HEAD：见 `git log -1`，工作树 clean。当前版本 `1.3.107`。
+HEAD：见 `git log -1`，工作树 clean。当前版本 `1.3.108`。
 
 ## 本轮已交付（1.3.90 → 1.3.93，10 个提交）
 | 提交 | 内容 |
@@ -32,6 +32,7 @@ HEAD：见 `git log -1`，工作树 clean。当前版本 `1.3.107`。
 | （1.3.105） | 权限五项 + 执行前校验：新增 `src/plugin_guard.py`（`PERMISSIONS` 五项 net / fs_read / fs_write / exec / wechat_send、`PermissionGuard` 的 `has`/`check`/`require`、`PermissionDenied` 继承 `PermissionError`）；两档 `enforce`（默认 False 只审计，True 真拦截）；`PluginDispatch._attach_guard` 在每个钩子调用前换视图（runtime 共享，不能只挂一次）；`runtime.permission_audit` 有界 50 条；清单校验 `permissions` 字段；6 个内置插件补声明 |
 | （1.3.106） | 数据命名空间 + `data_policy` 结构化：`PluginBase.data_dir(*parts)` 收口到 `state_dir/<插件 id>/`，含 `..` / `.` / 空串 / 分隔符 / 盘符直接抛 `ValueError`；`state_file` 走同一套校验（原来能 `state_file('../别的插件/x.json')` 跳出命名空间）；新增 `DATA_POLICY_TAGS = ("none","own_settings","own_state","chat_content","external_network")`，严格档要求标签列表、兼容档仍收自由文本；10 个种子包全改标签；`tools/make_plugin_packs.py` 新增 `DATA_POLICY` 表 |
 | （1.3.107） | 卸载清干净：`remove_pack(dest_root, pack_id, purge=False, state_dir=None, settings_path=None)` 的 `purge=True` 连数据一起清（默认 False，清数据不可逆）；新增 `_purge_plugin_data` 返回**真的清掉了哪些**、每步独立 try、设置文件坏掉不动它、符号链接不跟；`PluginManager.purge_plugin_data(plugin_id)` 封装并**同时清内存 `_settings`**（否则下次 `_save_settings()` 会把刚删的键写回去） |
+| （1.3.108） | 三个挂载点：新增 `src/plugin_mounts.py`（`MOUNT_POINTS` observe/compose/settle、`HOOK_MOUNT` 10 个能力名归位、`mount_points_of` 按链路顺序输出、`describe` 给控制台一行字）；**做的是归类不是合并**——8 个钩子返回契约互不兼容（`on_ingest` str / `on_block` bool / `on_observed` None），揉在一起要靠 isinstance 猜返回值，且 44 个内置插件与 25 个测试模块会全部失效；`plugin_packs` 的 `CAPABILITY_HOOKS` / `CAPABILITY_KINDS` 改为从 `plugin_mounts` 派生；`discover()` 输出新增 `mounts` / `mount_label` |
 
 1.3.101 全量回归：`Ran 4472 tests`（三片 1369 + 1525 + 1578，547.1s，`FAILED (failures=2, skipped=5)`），两例均为 `tests/test_cross_machine_paths151.py` 长路径（本机 TEMP 仅 33 字符，历史上一直失败，单独跑该模块稳定复现 `FAILED (failures=2)`）。
 
@@ -76,6 +77,7 @@ subprocess.run([r'D:\聊天机器人\微信机器人\.venv-wechat\Scripts\python
 - 1.3.101 本批测试：`tests.test_json_body_1401` 单独 `Ran 6 tests` / `OK`；与 `test_bad_json_1400`、`test_connection_management_fixes`、`test_plugin_market_routes`、`test_persona_import_152`、`test_wechat_app_flow`、`test_install_guard1351`、`test_plugin_installer` 一起 `Ran 185 tests in 64.012s` / `OK`；全量回归 `Ran 4472 tests`（三片 1369 + 1525 + 1578，547.1s），唯二非通过项为 `tests/test_cross_machine_paths151.py` 长路径（未打包、未跑 selfcheck）。
 - 1.3.102 本批测试：`tests.test_atomic_state1402` 单独 `Ran 6 tests in 0.594s` / `OK`；与 `test_plugin_installer`、`test_plugin_market_routes`、`test_web_context`、`test_plugin_guardrails147`、`test_install_guard1351` 一起 `Ran 139 tests in 31.103s` / `OK`；全量回归 `Ran 4478 tests`（三片 1536 + 1391 + 1551，739.3s），唯二非通过项为 `tests/test_cross_machine_paths151.py` 长路径（环境依赖，与本批无关；未打包、未跑 selfcheck）。
 - **清理教训（1.3.103 实测）**：`.tmp-*` 通配删除前必须 `git grep` 一下文件名在 `tests/` 与 `src/` 里的引用。`.gitignore` 里的 `.tmp-*` 只代表「不纳入版本控制」，不代表「可以随便删」——`.tmp-ink192.png` / `.tmp-ink-191.png` / `.tmp-ink-190b.png` 就是 `tests/test_title_template190.py` 的真机夹具，被删后 20 例 ERROR，且 git 无记录、回收站为空、全盘无同名文件，**不可恢复**。该模块现已改为夹具缺失时显式 skip（`require_fixture()`），14 例 skip、7 例合成图用例照常跑。
+- 1.3.108 本批测试：`tests.test_plugin_mounts_1108` 单独 `Ran 22 tests in 0.005s` / `OK`；与 11 个相关模块一起跑 `Ran 253 tests in 18.619s` / `OK (skipped=1)`；全量回归 `Ran 4593 tests`（三片 1553 + 1457 + 1583，skipped=22），唯二非通过项为 `tests/test_cross_machine_paths151.py` 长路径（本机 TEMP 仅 33 字符，环境依赖）。
 - 1.3.107 本批测试：`tests.test_plugin_purge_1107` 单独 `Ran 13 tests in 0.179s` / `OK (skipped=1)`；与 12 个相关模块一起跑 `Ran 240 tests in 18.815s` / `OK (skipped=1)`；全量回归 `Ran 4571 tests`（三片 1527 + 1572 + 1472，skipped=22），唯二非通过项为 `tests/test_cross_machine_paths151.py` 长路径（本机 TEMP 仅 33 字符，环境依赖）。
 - 1.3.106 本批测试：`tests.test_plugin_data_1106` 单独 `Ran 22 tests in 0.174s` / `OK`；与 13 个相关模块一起跑 `Ran 284 tests in 22.526s` / `OK`；全量回归 `Ran 4558 tests`（三片 1657 + 1471 + 1430，skipped=21），唯二非通过项为 `tests/test_cross_machine_paths151.py` 长路径（本机 TEMP 仅 33 字符，环境依赖）。
 - 1.3.105 本批测试：`tests.test_plugin_permissions_1105` 单独 `Ran 23 tests in 0.117s` / `OK`；与 15 个相关模块一起跑 `Ran 311 tests in 27.314s` / `OK`；全量回归 `Ran 4536 tests`（三片 1506 + 1436 + 1594，skipped=21），唯二非通过项为 `tests/test_cross_machine_paths151.py` 长路径（本机 TEMP 仅 33 字符，环境依赖，与本批无关）。

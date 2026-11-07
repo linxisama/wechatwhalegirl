@@ -1,3 +1,16 @@
+## 1.3.108
+
+三个挂载点：把 8 个钩子归成「在链路的哪一步」。
+
+- **问题**：用户诊断「7 种钩子平铺」。问题不在钩子数量，而在于**没人说得清**「这个插件到底在链路的哪一步起作用」——插件作者不知道该实现哪个，用户装了十几个也看不出先后关系。
+- **为什么不直接改名合并**：8 个钩子的返回契约互不兼容。`on_ingest` 返回 `str`（立即回复并跳过模型）、`on_block` 返回 `bool`（丢弃消息）、`on_observed` 返回 `None`（只登记）。揉成一个 `observe()` 就要在里面靠 `isinstance` 猜返回值，那是把契约问题变成类型问题，更糟；而且 44 个内置插件、25 个测试模块会全部失效。
+- **做的是归类，不是合并**：新增 `src/plugin_mounts.py`，三个挂载点 `MOUNT_POINTS = (("observe", ...), ("compose", ...), ("settle", ...))`，`HOOK_MOUNT` 把 10 个能力名逐个归位（`on_observed`/`on_ingest`/`on_block` → observe；`on_pre_ai`/`on_prepare`/`describe`/`generate` → compose；`on_sent`/`on_post_reply`/`tick` → settle）。钩子签名一个字不动。
+- **`describe` / `generate` 也在表里**：它们不是 `PluginBase` 的方法（只有 `image_understanding` 与 `chat_controls` 各自实现），但是真实能力名，清单里写这两个的插件确实在 compose 这一步起作用。
+- **输出按链路顺序**：`mount_points_of()` 返回的顺序固定是 observe → compose → settle，不是按输入顺序——控制台直接拿它显示，不用自己排。
+- **`describe(capabilities)`** 给控制台插件卡片那一行字：「观察 / 组装 / 收尾」「设置门」「工具库」「未声明」。
+- **词表不再两处各写一份**：`src/plugin_packs.py` 的 `CAPABILITY_HOOKS` / `CAPABILITY_KINDS` 改为从 `plugin_mounts` 派生（`tuple(HOOK_MOUNT)` / `NON_HOOK_KINDS`），避免以后加钩子时漏改一处。
+- **`discover()` 输出带挂载点**：每个包条目新增 `mounts`（列表）与 `mount_label`（一句话），控制台不用自己去翻 `capabilities` 猜。
+- 测试：新增 `tests/test_plugin_mounts_1108.py` 22 例。与 11 个相关模块一起跑 `Ran 253 tests in 18.619s` / `OK (skipped=1)`；全量回归 `Ran 4593 tests`（三片 1553 + 1457 + 1583，skipped=22），唯二非通过项为 `tests/test_cross_machine_paths151.py` 长路径（本机 TEMP 仅 33 字符，环境依赖）。
 ## 1.3.107
 
 卸载清干净：删掉插件，行为与数据一起消失。

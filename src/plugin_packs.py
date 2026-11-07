@@ -78,11 +78,10 @@ DATA_POLICY_TAGS: Tuple[str, ...] = (
 #   settings = 纯设置门（例如 sticker_admin 只是藏起管理入口）
 #   helper   = 纯工具库（例如 sticker_memory 只导出指纹函数给别的模块用）
 # 但**空列表不行**：说不清自己提供什么能力的包，用户没法判断要不要装。
-CAPABILITY_HOOKS: Tuple[str, ...] = (
-    "on_observed", "on_ingest", "on_block", "on_pre_ai", "on_prepare",
-    "on_sent", "on_post_reply", "tick", "describe", "generate",
-)
-CAPABILITY_KINDS: Tuple[str, ...] = ("settings", "helper")
+# 从 src/plugin_mounts.py 派生，避免两处各写一份然后漂移。
+from .plugin_mounts import HOOK_MOUNT, NON_HOOK_KINDS
+CAPABILITY_HOOKS: Tuple[str, ...] = tuple(HOOK_MOUNT)
+CAPABILITY_KINDS: Tuple[str, ...] = NON_HOOK_KINDS
 CAPABILITY_VOCABULARY: Tuple[str, ...] = CAPABILITY_HOOKS + CAPABILITY_KINDS
 
 STRICT_REQUIRED_FIELDS: Tuple[str, ...] = (
@@ -468,6 +467,15 @@ def _inspect_pack(pack_dir: Path, host_version: str,
     base.update(id=str(meta.get("id") or ""), name=str(meta.get("name") or ""),
                 version=str(meta.get("version") or ""), status=status, errors=errors,
                 meta=meta, warnings=list(meta.get("warnings") or []))
+    # 挂载点（1.3.108）：控制台直接显示「这个插件在哪几步起作用」，
+    # 不用自己去翻 capabilities 猜。
+    try:
+        from .plugin_mounts import mount_points_of, describe as describe_mounts
+        base["mounts"] = list(mount_points_of(meta.get("capabilities") or ()))
+        base["mount_label"] = describe_mounts(meta.get("capabilities") or ())
+    except Exception:
+        base["mounts"] = []
+        base["mount_label"] = ""
     return base
 
 
