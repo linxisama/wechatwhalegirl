@@ -236,8 +236,12 @@ class PluginManager(PluginDispatch, PluginHealth):
 
     def _save_custom(self, ids: List[str]) -> None:
         payload = {"plugins": sorted(set(ids))}
-        self._custom_path.write_text(
-            json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        # 直接 write_text 会先截断再写：写到一半失败（磁盘满、被占用）就把清单
+        # 留成半截 JSON，下次启动 custom_plugin_ids() 解析失败返回 []，用户装的
+        # 插件全部从界面消失。本文件其它四处写盘都用 atomic_text，这里同样用。
+        from ..persistence import atomic_text
+        atomic_text(self._custom_path,
+                    json.dumps(payload, ensure_ascii=False, indent=2) + "\n", backup=True)
 
     def register_custom(self, plugin_id: str) -> None:
         """把插件登记为自定义插件（下次启动也会加载）。"""

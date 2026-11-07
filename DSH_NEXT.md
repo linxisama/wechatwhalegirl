@@ -1,7 +1,7 @@
-# DSH_NEXT — 鲸鱼娘微信控制台 1.3.101 交接
+# DSH_NEXT — 鲸鱼娘微信控制台 1.3.102 交接
 
 仓库：D:\聊天机器人\微信机器人（**不是** D:\微信机器人）。
-HEAD：见 `git log -1`，工作树 clean。当前版本 `1.3.101`。
+HEAD：见 `git log -1`，工作树 clean。当前版本 `1.3.102`。
 
 ## 本轮已交付（1.3.90 → 1.3.93，10 个提交）
 | 提交 | 内容 |
@@ -26,6 +26,7 @@ HEAD：见 `git log -1`，工作树 clean。当前版本 `1.3.101`。
 | （1.3.99） | 表情库三处淘汰缺陷：`sticker_library.py:299-305` 单图超容量上限原本会把自己淘汰掉、整个收藏夹清空并抛 `KeyError`（改为落图前 `raise ValueError`，库不动）、`_evict()` 新增 `keep` 参数让刚入库那条不被自己挤掉（`:352-372`）、`_evict()` 改为只算不删并返回 `(entries, victims)`，`put()` 在索引落盘成功后才删旧图（`:338-345`，原先索引写失败会留下悬空条目）、新增 `_cap_bytes()` 统一容量算法（`:348-350`）；`sticker_api.py:134` 报错改用 `MAX_BYTES`、`:24` 注释改「单次导入总量上限」；契约 `WECHAT-CONTRACT.md:913` / `:1317` 的 6MB 改 12MB；新增 `tests/test_sticker_evict1399.py` 6 例；`交付报告-1.3.99.md` |
 | （1.3.100） | 坏 JSON 一律 400：`wechat_app.py:2595-2605` 在 `create_app` 里注册 `@app.exception_handler(JSONDecodeError)` 与 `@app.exception_handler(UnicodeDecodeError)`，两者都回 `JSONResponse({success: False, detail: BAD_JSON_MESSAGE, message: 同句}, status_code=400)`，文案常量在 `:72`、`from json import JSONDecodeError` 在 `:26`；17 个直接 `await request.json()` 的写接口原本 500（空 body 与非法 UTF-8 同样 500）；`persona_files.py:92-100` 把 `body=await request.json()` 单独包 `try/except (ValueError, UnicodeError)` 抛 `HTTPException(400, '导入请求不是有效的 JSON')`，不再把 `Expecting property name enclosed in double quotes` 英文原文当 detail 返回；新增 `tests/test_bad_json_1400.py` 9 例；`交付报告-1.3.100.md` |
 | （1.3.101） | 合法 JSON 但不是对象时：`persona_files.py:121-127`（`:125` `body.get('data')`）与 `wechat_app.py:3327-3334`（`:3331` `body.get('password')`）抛 `AttributeError: 'list' object has no attribute 'get'` 直接 500；六个 plugins 路由（`:3166` inspect、`:3177` install、`:3192` batch-inspect、`:3205` batch-install、`:3230` inspect-local、`:3241` install-local）的 `AttributeError` 被 `safe_error` 包装成「操作失败（AttributeError）」泄漏类名。修法：逐处 `isinstance(body, dict)` 判断（不为 `AttributeError` 注册全局 handler，免得吞掉真 bug），六个 plugins 文案统一「请求内容必须是 JSON 对象」；新增 `tests/test_json_body_1401.py` 6 例；`交付报告-1.3.101.md` |
+| （1.3.102） | 审计出两处非原子写：`src/plugins/manager.py:237-246` `_save_custom()` 与 `src/plugins/__init__.py:166-171` `PluginBase.save_state()` 原本都用 `Path.write_text`（先截断再写），写到一半失败留下半截 JSON；读取侧 `custom_plugin_ids()`（`manager.py:224-235`）与 `load_state()`（`plugins/__init__.py:159-164`）为「坏了不崩」静默回落成空清单 / 默认状态，用户装的插件全部消失、插件状态被重置且无任何报错。改用仓库既有的 `persistence.atomic_text`（清单 `backup=True`、状态 `backup=False`）；新增 `tests/test_atomic_state1402.py` 6 例（`mock.patch.object(persistence.os, "fsync", side_effect=OSError(28,...))` 注入写失败，改前 2 例真红 `AssertionError: OSError not raised`）；`交付报告-1.3.102.md` |
 
 1.3.100 全量回归：`Ran 4466 tests`（三片 1595 + 1453 + 1418，629.9s，`FAILED (failures=3, skipped=5)`），三例均为环境/时序依赖：两例 `tests/test_cross_machine_paths151.py` 长路径（本机 TEMP 仅 33 字符，历史上一直失败，单独跑该模块稳定复现 `FAILED (failures=2)`），一例 `tests/test_title_template190.py::PerformanceTest::test_rank_5600_names_under_three_seconds` 在分片并行下抖动（单独跑该模块两次均 `Ran 21 tests` / OK）。例数基线 1.3.90 = 4203 → 1.3.96 = 4427 → 1.3.98 = 4451 → 1.3.99 = 4457 → 1.3.100 = 4466（+9 = 本批新增的 9 例）。
 
@@ -64,3 +65,4 @@ subprocess.run([r'D:\聊天机器人\微信机器人\.venv-wechat\Scripts\python
 - 本会话 `compress`/`acp_status`/`decompress` 在 run_code 里全部 undefined（77 个工具里没有），无法主动压缩上下文。
 - 1.3.100 本批测试：`tests.test_bad_json_1400` 单独 `Ran 9 tests` / `OK`；与 7 个相关模块一起 `Ran 151 tests in 81.415s` / `OK`；全量回归 `Ran 4466 tests`（三片 1595 + 1453 + 1418，629.9s），唯三非通过项均为环境/时序依赖（未打包、未跑 selfcheck）。
 - 1.3.101 本批测试：`tests.test_json_body_1401` 单独 `Ran 6 tests` / `OK`；与 `test_bad_json_1400`、`test_connection_management_fixes`、`test_plugin_market_routes`、`test_persona_import_152` 一起 `Ran 82 tests in 37.030s` / `OK`（未跑全量、未打包）。
+- 1.3.102 本批测试：`tests.test_atomic_state1402` 单独 `Ran 6 tests in 0.594s` / `OK`；与 `test_plugin_installer`、`test_plugin_market_routes`、`test_web_context`、`test_plugin_guardrails147` 一起 `Ran 120 tests in 24.801s` / `OK`（未跑全量、未打包、未 commit）。

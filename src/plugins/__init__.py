@@ -164,6 +164,8 @@ class PluginBase:
             return {} if default is None else default
 
     def save_state(self, name: str, data):
-        self.state_file(name).write_text(
-            json.dumps(data, ensure_ascii=False, indent=2), "utf-8"
-        )
+        # 状态文件写坏后 load_state 会静默回落成默认值，插件看上去「重置了」，
+        # 用户无从察觉。走 atomic_text 先写临时文件再替换，失败时旧状态还在。
+        from ..persistence import atomic_text
+        atomic_text(self.state_file(name),
+                    json.dumps(data, ensure_ascii=False, indent=2), backup=False)

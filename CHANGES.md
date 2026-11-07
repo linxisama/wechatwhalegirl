@@ -1,3 +1,12 @@
+## 1.3.102
+
+审计发现两处清单/状态文件不是原子写：写到一半失败会留下半截 JSON，而读取侧为了「坏了也不崩」静默回落到空清单或默认状态 —— 用户装的插件从界面消失、插件状态被重置，全程没有任何报错。
+
+- **自定义插件清单写坏就全丢**（`src/plugins/manager.py:237-240`，改后 `:237-246`）：`_save_custom()` 原本 `self._custom_path.write_text(json.dumps(...))`，`write_text` 先以 `w` 截断目标文件再写；磁盘满、文件被杀毒/索引器占用时写到一半抛 `OSError`，`custom_plugins.json` 就停成 `'{\n  "plugins": [\n    "a_plu'` 这样的半截文本。而 `custom_plugin_ids()`（`:224-235`）为「清单损坏时返回空列表，不崩」`except Exception: return []`，于是下次启动 `PluginManager(d).custom_plugin_ids()` 返回 `[]` —— 用户装的所有自定义插件从界面消失，注册表本身还在磁盘上，但没人再读它。本文件另外四处写盘（`:219-220` `removed_plugins.json`、`:320-321` `plugin_settings.json`、`:368-369` / `:414-415` `plugin_settings.migrations.json`）本来都用 `persistence.atomic_text`，只有这一处漏了。
+- **插件状态文件同一类问题**（`src/plugins/__init__.py:166-169`）：`PluginBase.save_state()` 也是 `self.state_file(name).write_text(json.dumps(...), "utf-8")`。`load_state()`（`:159-164`）`except Exception: return {} if default is None else default` —— 状态文件写坏后插件静默「重置」，用户看到的是「我设的静音时段怎么没了」而日志里什么都没有。涉及 `emotion_state`、`group_ambient`、`member_aliases`、`minimal_mode`、`reply_dedupe`、`sticker_cadence`、`sticker_memory`、`web_context` 八个插件。
+- **修法：改用仓库既有的 `persistence.atomic_text`**，不新造轮子。它先 `tempfile.mkstemp` 在同目录写临时文件、`flush` + `os.fsync`，成功后才 `os.replace` 换上去；失败时 `finally` 删临时文件，目标文件保持原样。清单那处 `backup=True`（覆盖前留一份 `.bak`，与本文件其它四处一致），状态那处 `backup=False`（状态文件写得频繁，留备份只会堆垃圾）。
+- **为什么之前没发现**：`atomic_text` 在仓库里已有 30 处调用（`config_manager`、`style_manager`、`admin_sessions`、`plugin_health`…），正是这套「先写临时文件再替换」的范例；但这两个写入点是后加的，直接用了最顺手的 `write_text`。没有测试覆盖「写失败」路径，因为正常跑测试不会让 `fsync` 抛错。
+- **测试**：新增 `tests/test_atomic_state1402.py` 6 例——清单写失败时旧文件一个字节不变且仍能解析、新实例仍读得到原清单；保存后无残留 `.tmp`；第二次保存留下 `.bak` 且内容是上一版；状态文件写失败时旧状态不变；`save_state` 与 `load_state` 往返一致（防把 dict 当文本二次编码）；目标文件本来不存在时写失败不留下半截文件。写失败用 `mock.patch.object(persistence.os, "fsync", side_effect=OSError(28, ...))` 注入（`os` 是模块属性、可 patch；`io.TextIOWrapper.write` 是 C 类型属性、patch 会抛 `TypeError: cannot set 'write' attribute of immutable type`）。单独跑 `Ran 6 tests` / `OK`；与 4 个相邻模块一起跑 `Ran 120 tests in 24.801s` / `OK`。
 ## 1.3.101
 
 请求体是合法 JSON 但不是对象（数组 / 字符串 / 数字 / true / null）时，两处接口 500、六处把异常类名当文案回给用户；改成一律 400 + 中文提示。
