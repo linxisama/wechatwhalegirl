@@ -14,9 +14,11 @@
 - `src/plugins/sticker_memory.py` :157-182 `known_notes(..., meaning_chars=None, max_items=None)`；:298-310 `notes_for(..., config=None)`
 - `tests/test_sticker_budget1392.py` 17 例；复核 `Ran 92 tests OK`
 
+## 已提交（续）
+- `cc31fda` 日志：并发 handler 竞态、凭据落盘泄漏、非法路径抛异常三处修复 + logs/index.jsonl 结构化索引
+
 ## 工作树未提交（各子代理半成品）
-- `M DSH_NEXT.md`
-- ` M src/dsh_api.py`
+- `M src/dsh_api.py`
 - ` M src/dsh_autoconnect.py`
 - ` M src/dsh_discovery.py`
 - ` M src/gui/agent_attachments.py`
@@ -24,9 +26,8 @@
 - ` M src/gui/safety_panel.py`
 - ` M src/gui/send_panel.py`
 - ` M src/local_learning.py`
-- ` M src/logging_setup.py`
+- ` M src/plugins/conversation_memory.py`
 - ` M src/style_manager.py`
-- `?? tests/test_logging_opt1392.py`
 
 ## UI 子代理 016beb6d 中途失败
 改了 4 个文件、**没建测试**：src/gui/agent_attachments.py、src/gui/conversation_archive.py、src/gui/safety_panel.py、src/gui/send_panel.py（合计 +58/-11）。
