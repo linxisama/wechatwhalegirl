@@ -2874,11 +2874,41 @@ class PersonaTab(QWidget):
     def refresh(self):
         call_api(self, "GET", "personas", timeout=10, on_done=self._apply_personas)
 
+    @staticmethod
+    def _conflict_notes(data):
+        """把人设冲突翻成中文短语。
+
+        冲突只在加载期算一次（src/style_manager.py 的 conflicts()），界面不重新判断，
+        否则界面与运行日志会各说一套。
+        """
+        notes = []
+        for item in data.get("conflicts") or []:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name") or "").strip()
+            if not name:
+                continue
+            if item.get("kind") == "near_display":
+                other = str(item.get("other_name") or "").strip()
+                notes.append(f"「{name}」与「{other}」显示名近似" if other else f"「{name}」显示名近似")
+            else:
+                notes.append(f"「{name}」自定义覆盖内置")
+        return notes
+
     def _apply_personas(self, data):
         personas = data.get("personas") or []
         active = data.get("active") or ""
         display = next((p.get('display_name') for p in personas if p.get('name')==active), active)
-        self.active_persona_hint.setText(f'当前生效人设：{display}（{active}）')
+        hint = f'当前生效人设：{display}（{active}）'
+        notes = self._conflict_notes(data)
+        if notes:
+            shown = "；".join(notes[:3])
+            more = f" 等 {len(notes)} 条" if len(notes) > 3 else ""
+            hint += f"\n⚠ 人设冲突 {len(notes)} 条：{shown}{more}"
+            self.active_persona_hint.setToolTip("\n".join(notes))
+        else:
+            self.active_persona_hint.setToolTip("")
+        self.active_persona_hint.setText(hint)
         if not self._current:
             self._current=active
         self.list.blockSignals(True)

@@ -1,3 +1,10 @@
+## 1.3.96 人设冲突可见契约
+
+- **`GET /api/personas` 必须带 `conflicts`**：内容是 `StyleManager.conflicts()` 的只读副本（`list[dict]`）。stub style 未实现该方法时返回 `[]`，不得抛错、不得让接口 500。
+- **冲突条目字段**：`same_name` 为 `{kind, name, previous, current, previous_file, current_file}`；`near_display` 为 `{kind, name, other_name, previous, current, previous_file, current_file}`。界面只读，不重新判断冲突。
+- **界面文案**：`same_name` → 「X」自定义覆盖内置；`near_display` → 「X」与「Y」显示名近似。最多三条进 `active_persona_hint`，全量进 tooltip。非 dict 或缺 `name` 的条目跳过。
+- **不得把冲突写进 `self.notice`**：该控件在每次加载人设详情（`wechat_gui.py:2935`）与保存/导入/上传反馈时会被清空。
+
 ## 1.3.95 学习系统：表达例句终于能自动批准、淘汰按命中次数、记忆页打开更快
 
 - 表达自动批准契约（新增）：`src/local_learning.py:141-154` `expression_threshold()` 只读插件设置 `expressionApproveHits`（`src/plugins/conversation_memory.py:56` FieldSchema `min=0 max=10`、`:66` 默认 `0`），`:154` `value if 2<=value<=10 else 0`——**默认 0 即关闭，填 1 也等同关闭**。升级分支在 `:182`：仅当 `status=='candidate'`、`hits>=threshold`、且 `expression_quality(text)` 通过时置 `approved`。**默认值不得改动**：`tests/test_learning_156.py:60` 已钉死「表达例句须人工批准」。

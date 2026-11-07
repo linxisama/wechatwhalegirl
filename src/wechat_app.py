@@ -3045,8 +3045,11 @@ def create_app(runtime=None):
     @app.get("/api/personas")
     async def personas():
         bot = app.state.bot
+        # conflicts 是 1.3.96 新加的：老 stub 未必实现，缺了就当没有冲突，
+        # 否则只读列表这种接口会因为一个可选字段整个 500。
+        conflicts = bot.style.conflicts() if hasattr(bot.style, "conflicts") else []
         return {"active": bot.style.active_name, "locked": bot.style.locked_name,
-                "personas": bot.style.list_styles()}
+                "personas": bot.style.list_styles(), "conflicts": conflicts}
 
     @app.get("/api/personas/{name}")
     async def persona_detail(name: str):

@@ -1,3 +1,11 @@
+## 1.3.96
+
+补上十项诉求里「人格冲突」的最后一段：冲突以前只进运行日志，界面上看不见。
+
+- **人设冲突界面可见**（`src/wechat_app.py:3045` 起 `GET /api/personas`）：返回值新增 `conflicts` 字段，内容就是 `StyleManager.conflicts()` 的只读副本。以前 `_conflicts` 在 `src/style_manager.py` 之外零读取方——仓库自带 `styles/tsundere_whale_girl.yaml` 与 `styles/custom/tsundere_whale_girl.yaml` 同名，每次启动都会产生一条用户看不到的冲突记录。取值用 `hasattr` 兜底：老 stub 没实现 `conflicts()` 时按无冲突返回，只读列表的接口不该因为一个可选字段整个 500。
+- **人设页显示冲突**（`wechat_gui.py` 的 `PersonaTab._conflict_notes` / `_apply_personas`）：新增静态方法把人设冲突翻成中文短语——`same_name` → 「X」自定义覆盖内置，`near_display` → 「X」与「Y」显示名近似。最多三条进正文（`⚠ 人设冲突 N 条：…`），全量进 tooltip；非 dict、缺 `name` 的记录直接跳过，不让脏数据把整页打崩。文案落在 `active_persona_hint` 而不是 `self.notice`：notice 在每次加载人设详情（`wechat_gui.py:2935`）与保存/导入/上传反馈时都会被清空，冲突放那儿会被随时冲掉。
+- **测试**：新增 `tests/test_persona_conflict_gui1396.py` 14 例（短语翻译 6 例、页面渲染 4 例、`GET /api/personas` 2 例、`StyleManager` 基线 2 例）。既有 11 个引用 personas 的模块 163 例全绿，一字节未改。
+
 ## 1.3.95
 
 补上十项诉求里唯一没真正做过的一项：学习系统。上一版只修了学习条目的人设隔离，学习系统本身一行未动。

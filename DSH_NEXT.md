@@ -1,7 +1,7 @@
-# DSH_NEXT — 鲸鱼娘微信控制台 1.3.95 交接
+# DSH_NEXT — 鲸鱼娘微信控制台 1.3.96 交接
 
 仓库：D:\聊天机器人\微信机器人（**不是** D:\微信机器人）。
-HEAD：见 `git log -1`，工作树 clean。当前版本 `1.3.95`。
+HEAD：见 `git log -1`，工作树 clean。当前版本 `1.3.96`。
 
 ## 本轮已交付（1.3.90 → 1.3.93，10 个提交）
 | 提交 | 内容 |
@@ -19,16 +19,17 @@ HEAD：见 `git log -1`，工作树 clean。当前版本 `1.3.95`。
 | `edf97f6` | 1.3.93 版本号 + 九份文档 + `交付报告-1.3.93.md` |
 | （1.3.94） | 五处接线：`record_round` 补 `plan=`、淘汰改按得分、`recall` 接 `rank()`、`build_history` 改 `continue`、`_conflicts` 写进日志；两处陈旧文档订正；`交付报告-1.3.94.md` |
 | （1.3.95） | 学习系统优化：expression 自动批准开关（`expressionApproveHits`，默认 0 关）、200 条淘汰插入 `hits DESC`、`view()` N+1 203→4、`overview()` 100→2；`交付报告-1.3.95.md` |
+| `f940956` | docs：七份文档补 1.3.94 与 1.3.95 两段 |
+| （1.3.96） | 人设冲突界面可见：`GET /api/personas` 增 `conflicts`（`hasattr` 兜底）、人设页 `_apply_personas` 渲染计数 + tooltip 明细；`交付报告-1.3.96.md` |
 
-累计 66 files changed, 6804 insertions(+), 362 deletions(-)；新增 9 个测试模块共 177 例。
-全量回归 `Ran 4380 tests in 506.425s` / `FAILED (failures=2, skipped=5)`，两例均为 `tests/test_cross_machine_paths151.py` 的长路径环境依赖（本机 TEMP 仅 33 字符），与改动无关。基线 1.3.90 为 4203 例。
+1.3.96 全量回归：`Ran 4427 tests`（A 半 2198 + B 半 2229，`FAILED (failures=2)`），两例均为 `tests/test_cross_machine_paths151.py` 的长路径环境依赖（本机 TEMP 仅 33 字符），与改动无关；把 TEMP 指到 166 字符目录后该模块 16 例全 OK。例数基线 1.3.90 = 4203 → 1.3.95 = 4413 → 1.3.96 = 4427（+14，恰为 `test_persona_conflict_gui1396.py` 的用例数）。
 
 ## 1.3.94 已接线（原「待接线」清单已清空）
 1. `src/wechat_app.py:2275-2276` `record_round(...)` 已补 `plan=locals().get('prompt_plan')`。
 2. `src/chat_state.py` `remember()` 已换 `memory_maintenance.evict()`（hits 0.5 / 新鲜度 0.3 / 具体度 0.2，`EVICT_GRACE=3600` 保护刚写入行）。
 3. `src/chat_state.py` `recall()` 已换 `memory_rank.rank()`（排序 + 去重 + 统计），传入 dict 需带 `hits`/`updated`（`field_of(item,"hits",5)`/`field_of(item,"updated",7)`）。
 4. `src/chat_state.py` `build_history` 超预算分支已由 `break` 改 `continue`；**未**引入相关度排序（该函数无 `query` 参数）。
-5. `src/style_manager.py` 新增 `conflicts()`；`src/wechat_app.py:318` 在 `load_all()` 后写日志。**GUI 仍未展示**，要展示需改 `wechat_gui.py`。
+5. `src/style_manager.py` 新增 `conflicts()`；`src/wechat_app.py:320` 在 `load_all()` 后写日志；1.3.96 起 `GET /api/personas` 返回 `conflicts`，`wechat_gui.py` 的 `PersonaTab._apply_personas` 把计数写进 `active_persona_hint`、明细进 tooltip。
 
 ## 待用户决定
 - 第三层清理 36.16GB 交付物历史（`installer/` 1.3.85 及更早 143 个 Setup、`发布/` 1.3.30 及更早 53 个目录、`release/` 1.3.86 及更早 20 个目录）未删，且整个删除动作未经用户确认。
@@ -50,7 +51,7 @@ env['QT_QPA_PLATFORM'] = 'offscreen'   # 仅 GUI 测试
 subprocess.run([r'D:\聊天机器人\微信机器人\.venv-wechat\Scripts\python.exe','-u','-m','unittest','discover','-s','tests'],
                cwd=r'D:\聊天机器人\微信机器人', env=env)
 ```
-- 全量回归约 506 秒，需 `timeoutMs` ≥ 560000，`maxBuffer` ≥ 48MB。
+- 全量回归约 506–536 秒，`timeoutMs` 给 580000 仍可能被 spawnSync 杀掉（实测 580.2s 被杀、日志无结论）。可靠做法：按模块清单分片跑（`.tmp-half-a.json` 166 个、`.tmp-half-b1.json` 83 个、`.tmp-half-b2.json` 82 个），配 `.tmp-run-mod.py` 逐模块写进度日志，单片 140–250 秒。
 - PowerShell 脚本必须全 ASCII + UTF-8 BOM 写盘，否则 PS 5.1 按 GBK 读报 `ParserError: 字符串缺少终止符`。
 - 提交必须带身份：`git -c user.name=linxisama -c user.email=2019117802@qq.com commit -F <msg>`。
 - 行尾：`.gitattributes` 是 `* -text`；`src/*.py` 与 `wechat_gui.py` 是 **LF**，`.md` 是 **CRLF**。例外（HEAD 本就是 CRLF）：`src/logging_setup.py`、`src/prompt_budget.py`、`src/style_manager.py`。
