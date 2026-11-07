@@ -422,10 +422,12 @@ class WeChatRuntime:
         # 有界：只留最近 50 条，长跑不会把内存吃满。
         self.bid_trace: list[dict] = []
         # 权限审计（1.3.105）：插件用了没声明的能力时记在这里。
-        # 默认只审计不拦截（enforce=False）—— 44 个内置插件里有 7 个真的联网或
-        # 读写文件，一刀切会让它们在升级当天全部被隔离。见 src/plugin_guard.py。
+        # 1.3.111 起默认强制（enforce=True）：目标是「未声明即拒绝」，不是「未声明就记一笔」。
+        # 能翻的前提是实测确认过——六个真正做危险动作的插件（context_chime / image_library /
+        # image_understanding / sticker_steal / web_context / web_lookup）全部已正确声明，
+        # 种子包的 plugin.py 只是薄封装不含危险调用。仍有漏网时可以把它设回 False。
         self.permission_audit: list[dict] = []
-        self.permission_enforce = False
+        self.permission_enforce = True
         self.plugins = PluginManager(self.root / "data/wechat-only",
                                      default_overrides={"burst_merge": {"capMs": 3000}})
         self.chat_state = ChatState(self.db)

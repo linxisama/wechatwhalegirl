@@ -1,3 +1,24 @@
+## 1.3.111
+
+权限默认强制：把「未声明就记一笔」改成「未声明即拒绝」。
+
+- **问题**：1.3.105 实现了两档 `enforce`，但默认是 `False`（只审计）。目标是「权限五项 + 执行前校验（**未声明即拒绝**）」，默认不拦等于没兑现这一条。
+- **翻成 `True` 之前先验证**：逐个扫 `src/plugins/` 下所有真正做危险动作的插件，确认声明齐全：
+
+| 插件 | 实际用到 | 已声明 |
+|---|---|---|
+| `context_chime` | net | net ✓ |
+| `image_library` | net, fs_write | net, fs_read, fs_write ✓ |
+| `image_understanding` | net, fs_write, fs_read | net, fs_read, fs_write ✓ |
+| `sticker_steal` | fs_read | fs_read, fs_write ✓ |
+| `web_context` | net | net ✓ |
+| `web_lookup` | net | net ✓ |
+
+`plugin-packs/` 里的种子包 `plugin.py` 只是薄封装（`from src.plugins.<id> import <Class> as PLUGIN`），不含危险调用，不会被误判。
+
+- **改动**：`src/wechat_app.py` 的 `self.permission_enforce = False` 改为 `True`，注释写明「能翻的前提是实测确认过」以及「仍有漏网时可以设回 False」。
+- **未声明即拒绝的实际行为**：插件调用 `runtime.permission_guard.require('net')` 时抛 `PermissionDenied`，由 `plugin_dispatch.protected()` 记故障并跳过该插件本轮——**不会让整条消息处理链挂掉**，只是这个插件这轮不参与。
+- 测试：8 个相关模块一起跑 `Ran 179 tests in 25.898s` / `OK`；全量回归 `Ran 4649 tests`（三片 1527 + 1649 + 1473，skipped=22），唯二非通过项为 `tests/test_cross_machine_paths151.py` 长路径（本机 TEMP 仅 33 字符，环境依赖）。
 ## 1.3.110
 
 接线：把 1.3.109 的两个纯逻辑模块真正接进运行路径。
