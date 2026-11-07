@@ -5,6 +5,12 @@ import math
 
 
 class PluginDispatch:
+    # 竞标-仲裁只作用于**排他钩子**：它们的语义是「一个插件说话，其余闭嘴」。
+    # on_ingest 返回字符串 = 立即回复并跳过模型；on_block 返回 True = 丢弃这条消息。
+    # 其余钩子（on_observed / on_pre_ai / on_prepare / on_sent / on_post_reply / tick）
+    # 都是累积或变换，必须全部执行 —— 拿它们仲裁等于让一半插件凭空消失。
+    EXCLUSIVE_HOOKS = ('on_ingest', 'on_block')
+
     PREPARE_TIMEOUT = 75.0
     POST_TIMEOUT = 5.0
     TICK_TIMEOUT = 60.0
@@ -29,6 +35,48 @@ class PluginDispatch:
                 return self._switch_on(plugin, pid)
             return bool(plugin.enabled)
 
+    def _weight_of(self, plugin) -> int:
+        """插件的竞标权重；没写或写坏了都按 0 处理（存量插件一个都不用改）。"""
+        meta = getattr(plugin, 'META', None)
+        value = getattr(meta, 'capability_weight', 0)
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return 0
+
+    def _bidders(self, hook):
+        """按 (权重降序, 注册顺序) 排出这个排他钩子的竞标顺序。
+
+        权重相同仍按注册顺序 —— 这条保证了不填权重的存量插件行为完全不变。
+        tuple(self._plugins.values()) 的顺序就是注册顺序，sorted 是稳定排序。
+        """
+        candidates = [plugin for plugin in tuple(self._plugins.values())
+                      if self._enabled(plugin)]
+        return sorted(candidates, key=lambda plugin: -self._weight_of(plugin))
+
+    def _record_bid(self, runtime, hook, winner, losers, reason):
+        """把一次仲裁写进 runtime.bid_trace，供控制台与日志回答「为什么是它」。
+
+        trace 缺失或写不进去都不能影响主链路：这是观测，不是业务。
+        """
+        # 没有败者就说明这次没发生仲裁（唯一候选，或前面几个自己没话说），
+        # 记一条 losers=[] 只会让日志里堆满「什么都没发生」的噪声。
+        if not losers:
+            return
+        trace = getattr(runtime, 'bid_trace', None)
+        if not isinstance(trace, list):
+            return
+        try:
+            trace.append({'hook': hook,
+                          'winner': winner,
+                          'weight': self._weight_of(self._plugins.get(winner)) if winner else 0,
+                          'losers': losers,
+                          'reason': reason})
+            # 有界：长跑时 trace 只增不减会把内存吃满，只留最近 50 条。
+            del trace[:-50]
+        except Exception:
+            pass
+
     def _switch_on(self, plugin, pid):
         if pid in getattr(self, '_removed', set()):
             return False
@@ -38,9 +86,17 @@ class PluginDispatch:
         return bool(settings.get('enabled', getattr(plugin.META, 'enabled_by_default', False)))
 
     def run_on_ingest(self, message, runtime):
-        for plugin in tuple(self._plugins.values()):
-            if not self._enabled(plugin):
-                continue
+        """排他钩子：按权重从高到低问，第一个给出回复的赢，其余记进 trace。
+
+        注意 losers 里只记**没被问到**的插件。已经问过但返回 None 的插件不算输，
+        它们是「这次没话说」，跟「被权重挤掉」是两件事，混在一起会让用户以为
+        自己的插件被禁用了。
+        """
+        bidders = self._bidders('on_ingest')
+        losers = [self.plugin_id(plugin) for plugin in bidders]
+        for plugin in bidders:
+            pid = self.plugin_id(plugin)
+            losers.remove(pid)
             with self.protected(plugin, 'on_ingest'):
                 with self.local_changes(message, runtime=runtime) as (working, _):
                     result = self.bounded_sync(plugin.on_ingest, working, runtime,
@@ -48,8 +104,12 @@ class PluginDispatch:
                     if result is not None and not isinstance(result, str):
                         raise TypeError('on_ingest must return str or None')
                     if result is not None:
-                        working['_immediate_plugin'] = self.plugin_id(plugin)
+                        working['_immediate_plugin'] = pid
                 if result is not None:
+                    self._record_bid(runtime, 'on_ingest', pid,
+                                     [{'id': item, 'weight': self._weight_of(self._plugins.get(item))}
+                                      for item in losers],
+                                     'weight')
                     return result
         return None
 
@@ -62,16 +122,29 @@ class PluginDispatch:
                                           timeout=self.SYNC_TIMEOUT)
 
     def run_on_block(self, message, runtime):
-        for plugin in tuple(self._plugins.values()):
-            if self._enabled(plugin):
-                with self.protected(plugin, 'on_block'):
-                    with self.local_changes(message, runtime=runtime) as (working, _):
-                        blocked = self.bounded_sync(plugin.on_block, working, runtime,
-                                                    timeout=self.SYNC_TIMEOUT)
-                        if blocked is not None and not isinstance(blocked, bool):
-                            raise TypeError('on_block must return bool or None')
-                    if blocked:
-                        return True
+        """排他钩子：按权重从高到低问，第一个返回 True 的赢。
+
+        与 on_ingest 的区别：on_block 返回 False 是明确的「我看过了，不拦」，
+        所以**必须继续问下一个** —— 不能因为高权重插件说了句不拦就整条放行。
+        这里只在真的拦下时才停，权重只决定「谁的意见先被听取」。
+        """
+        bidders = self._bidders('on_block')
+        losers = [self.plugin_id(plugin) for plugin in bidders]
+        for plugin in bidders:
+            pid = self.plugin_id(plugin)
+            losers.remove(pid)
+            with self.protected(plugin, 'on_block'):
+                with self.local_changes(message, runtime=runtime) as (working, _):
+                    blocked = self.bounded_sync(plugin.on_block, working, runtime,
+                                                timeout=self.SYNC_TIMEOUT)
+                    if blocked is not None and not isinstance(blocked, bool):
+                        raise TypeError('on_block must return bool or None')
+                if blocked:
+                    self._record_bid(runtime, 'on_block', pid,
+                                     [{'id': item, 'weight': self._weight_of(self._plugins.get(item))}
+                                      for item in losers],
+                                     'weight')
+                    return True
         return bool(self.blocked_policies())
 
     def run_on_pre_ai(self, message, conversation, runtime):

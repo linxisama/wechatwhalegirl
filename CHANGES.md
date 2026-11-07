@@ -1,3 +1,14 @@
+## 1.3.104
+
+竞标-仲裁：排他钩子按权重决定谁说话，其余记进 trace。
+
+- **问题**：`src/plugin_dispatch.py` 的每个钩子都是 `for plugin in tuple(self._plugins.values())` 顺序执行，先到先得。`on_ingest` 返回字符串 = 立即回复并跳过模型、`on_block` 返回 True = 丢弃消息，这两个是**排他**的，谁先被 import 谁赢——用户完全无从判断为什么是它在回。这正是「一个回话关联到四五个插件，最后只调用最主要的那个」的成因。
+- **只仲裁两个钩子**：新增 `PluginDispatch.EXCLUSIVE_HOOKS = ('on_ingest', 'on_block')`。其余六个（`on_observed` / `on_pre_ai` / `on_prepare` / `on_sent` / `on_post_reply` / `tick`）是累积或变换，**必须全部执行**——拿它们仲裁等于让一半插件凭空消失。
+- **权重**：`PluginMeta` 新增 `capability_weight: int = 0`。`_bidders(hook)` 按 `(权重降序, 注册顺序)` 排序；`sorted` 是稳定排序，所以**不填权重的存量插件行为完全不变**。
+- **on_block 的语义差别**：返回 `False` 是明确的「我看过了，不拦」，必须继续问下一个——不能因为高权重插件说了句不拦就整条放行。只有真的拦下才停。
+- **留痕**：`runtime.bid_trace` 记 `{hook, winner, weight, losers:[{id,weight}], reason}`。**没有败者就不记**（唯一候选、或前面几个自己没话说，都不是仲裁，记一条 `losers=[]` 只是噪声）。有界：只留最近 50 条（`del trace[:-50]`），长跑不会把内存吃满。`runtime` 没有 `bid_trace` 属性时静默跳过，老调用点不受影响。
+- `src/wechat_app.py` 的 runtime 初始化新增 `self.bid_trace: list[dict] = []`。
+- 测试：新增 `tests/test_plugin_bid_1104.py` 15 例（排他声明 1、权重胜负 4、trace 5、on_block 3、非排他不受影响 2）。与 16 个依赖 dispatch 的模块一起跑 `Ran 315 tests in 36.434s` / `OK`；全量回归 `Ran 4513 tests`（三片 1454 + 1566 + 1493，skipped=21），唯二非通过项为 `tests/test_cross_machine_paths151.py` 长路径（本机 TEMP 仅 33 字符，环境依赖，与本批无关）。
 ## 1.3.103
 
 插件清单契约升级：`api_version` 整数化 + 严格档 13 字段。

@@ -39,6 +39,13 @@ class PluginMeta:
     api_version: str = ""      # 插件声明的宿主 API 版本，空=按宿主默认
     author: str = ""           # 作者，单行文本
     min_host_version: str = "" # 要求的最低宿主版本，空=不限制
+    # 竞标权重（1.3.104）：只在**排他钩子**（on_ingest / on_block）上起作用。
+    # 排他钩子的语义是「一个插件说话，其余闭嘴」：on_ingest 返回字符串 = 立即回复并
+    # 跳过模型，on_block 返回 True = 丢弃这条消息。多个插件同时命中时，过去按注册
+    # 顺序先到先得 —— 谁先被 import 谁赢，用户完全无从判断为什么是它在回。
+    # 现在按 (权重降序, 注册顺序) 排序后依次问，第一个给出结果的赢，其余记进
+    # runtime.bid_trace 备查。权重相同仍按注册顺序，所以不填权重的存量插件行为不变。
+    capability_weight: int = 0
 
     def schema_dict(self) -> dict:
         result = {}

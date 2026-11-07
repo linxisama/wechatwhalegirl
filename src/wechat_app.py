@@ -417,6 +417,10 @@ class WeChatRuntime:
         self.events: list[dict] = []
         self.recent: list[dict] = []
         self.reply_meta = None
+        # 竞标-仲裁留痕（1.3.104）：排他钩子（on_ingest / on_block）每次由谁赢、
+        # 谁被权重挤掉都记在这里，控制台与日志才回答得出「为什么是它在回」。
+        # 有界：只留最近 50 条，长跑不会把内存吃满。
+        self.bid_trace: list[dict] = []
         self.plugins = PluginManager(self.root / "data/wechat-only",
                                      default_overrides={"burst_merge": {"capMs": 3000}})
         self.chat_state = ChatState(self.db)
