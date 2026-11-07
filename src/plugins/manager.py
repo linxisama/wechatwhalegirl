@@ -263,6 +263,24 @@ class PluginManager(PluginDispatch, PluginHealth):
             self._save_faults()
         return True
 
+    def purge_plugin_data(self, plugin_id: str) -> list:
+        """清掉这个插件留下的设置与状态；返回真的清掉了哪些（1.3.107）。
+
+        为什么放在 manager 而不是 plugin_packs：只有这里知道 state_dir 与
+        _settings_path 的真实布局。plugin_packs 那边只负责删目录。
+
+        与「禁用」的区别：禁用保留数据（用户可能只是暂时关掉），卸载必须清干净
+        （用户的判定标准：删掉 jar，行为消失，不残留）。重装之后拿到的是默认值，
+        而不是上次的老设置。
+        """
+        from ..plugin_packs import _purge_plugin_data
+        purged = _purge_plugin_data(plugin_id, self.state_dir, self._settings_path)
+        # 内存里的那份也要清：purge 只改了磁盘，_settings 还留着旧键的话，
+        # 下一次 _save_settings() 会把刚删掉的东西原样写回去。
+        if "settings" in purged:
+            self._settings.pop(plugin_id, None)
+        return purged
+
     def reload(self) -> None:
         """重新读取设置与插件（装/卸插件后调用，界面无需重启）。"""
         self._settings = {}

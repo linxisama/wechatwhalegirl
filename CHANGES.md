@@ -1,3 +1,13 @@
+## 1.3.107
+
+卸载清干净：删掉插件，行为与数据一起消失。
+
+- **问题**：`remove_pack` 只删目录。设置留在 `plugin_settings.json`、状态留在 `plugin_state/<id>/`，重装之后「老设置又回来了」——那不是卸载，那是禁用。用户的判定标准第 2 条写得很清楚：「删掉 jar，行为消失，不残留」。
+- **`remove_pack(dest_root, pack_id, purge=False, state_dir=None, settings_path=None)`**：`purge=True` 时连数据一起清。默认 `False`——清数据不可逆，不能因为调用方没想清楚就替它决定。两个路径由调用方传（`plugin_packs` 不知道 manager 的内部布局），任一为 `None` 就跳过对应清理。
+- **`_purge_plugin_data(pack_id, state_dir, settings_path) -> List[str]`**：返回**真的清掉了哪些**（`state` / `settings`），而不是「打算清什么」。每一步独立 try——状态目录删不掉不该拦住设置清理，反之亦然。设置文件坏掉时不动它（不能把我们读不懂的文件改写成别的东西）。
+- **符号链接不跟**：`state_dir/<id>` 若是符号链接，跳过而不是顺着链接删到别处。有测试守着。
+- **`PluginManager.purge_plugin_data(plugin_id)`**：封装层，只有 manager 知道 `state_dir` 与 `_settings_path` 的真实布局。**同时清内存里的 `_settings`**——`purge` 只改磁盘的话，下一次 `_save_settings()` 会把刚删掉的键原样写回去。这条是跑测试时才发现的，不是设计时想到的。
+- 测试：新增 `tests/test_plugin_purge_1107.py` 13 例。与 12 个相关模块一起跑 `Ran 240 tests in 18.815s` / `OK (skipped=1)`；全量回归 `Ran 4571 tests`（三片 1527 + 1572 + 1472，skipped=22），唯二非通过项为 `tests/test_cross_machine_paths151.py` 长路径（本机 TEMP 仅 33 字符，环境依赖）。
 ## 1.3.106
 
 数据命名空间 + `data_policy` 结构化。

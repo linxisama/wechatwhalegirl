@@ -746,11 +746,21 @@ def install_pack(source: Path, dest_root: Path, host_version: Optional[str] = No
         shutil.rmtree(temp, ignore_errors=True)
 
 
-def remove_pack(dest_root: Path, pack_id: str) -> dict:
+def remove_pack(dest_root: Path, pack_id: str, purge: bool = False,
+                state_dir: Optional[Path] = None, settings_path: Optional[Path] = None
+                ) -> dict:
     """删除 dest_root 下的一个插件包目录。
 
     id 只允许小写字母/数字/下划线，并且解析后的目录必须正好是 dest_root 的直接子目录，
     避免 ../ 之类的写法删到别处。不存在时返回 reason='not_found'，不报错。
+
+    purge=True（1.3.107）时连数据一起清：state_dir/<id>/ 与 settings_path 里该 id 的键。
+    为什么需要它：用户的判定标准第 2 条是「删掉 jar，行为消失，不残留」。只删目录的话，
+    设置留在 plugin_settings.json、状态留在 plugin_state/<id>/，重装之后「老设置又回来了」——
+    那不是卸载，那是禁用。
+
+    默认 purge=False：清数据不可逆，不能因为调用方没想清楚就替它决定。
+    两个路径都由调用方传（这里不知道 manager 的内部布局），任一为 None 就跳过对应清理。
     """
     if not isinstance(pack_id, str) or not _REMOVE_ID_RE.match(pack_id) or pack_id in (".", ".."):
         return _result(False, "bad_id", "插件包标识不合法，已拒绝删除",
@@ -773,8 +783,46 @@ def remove_pack(dest_root: Path, pack_id: str) -> dict:
     except OSError as exc:
         return _result(False, "io_error", "删除插件包失败，请稍后再试", removed=False,
                        errors=["删除插件包失败"], detail=_error_text(exc))
-    return _result(True, "", "插件包 " + pack_id + " 已删除", removed=True, id=pack_id,
-                   path=str(target), errors=[])
+
+    purged = []
+    if purge:
+        purged = _purge_plugin_data(pack_id, state_dir, settings_path)
+    return _result(True, "", "插件包 " + pack_id + " 已删除"
+                   + ("（连同设置与状态）" if purge else ""),
+                   removed=True, id=pack_id, path=str(target), purged=purged, errors=[])
+
+
+def _purge_plugin_data(pack_id: str, state_dir: Optional[Path],
+                       settings_path: Optional[Path]) -> List[str]:
+    """清掉这个插件留下的设置与状态；返回真的清掉了哪些（给界面显示）。
+
+    每一步都独立 try：状态目录删不掉不该拦住设置清理，反之亦然。
+    清不掉的那一项不写进返回值 —— 报告「清了什么」比报告「打算清什么」有用。
+    """
+    purged: List[str] = []
+    if state_dir is not None:
+        folder = Path(state_dir) / pack_id
+        try:
+            if folder.is_dir() and not folder.is_symlink():
+                shutil.rmtree(folder)
+                purged.append("state")
+        except OSError:
+            pass
+    if settings_path is not None:
+        path = Path(settings_path)
+        try:
+            data = json.loads(path.read_text("utf-8"))
+        except (OSError, ValueError):
+            data = None
+        if isinstance(data, dict) and pack_id in data:
+            data.pop(pack_id, None)
+            try:
+                from .persistence import atomic_text
+                atomic_text(path, json.dumps(data, ensure_ascii=False, indent=2), backup=True)
+                purged.append("settings")
+            except Exception:
+                pass
+    return purged
 
 
 def pack_dirs_for(data_dir: Optional[Path] = None) -> List[Path]:
