@@ -1,3 +1,11 @@
+## 1.3.97
+
+修一个内存无上限：`MemberDirectory` 每个房间的成员数有上限，房间数量却从来没有。
+
+- **房间数加 LRU 上限**（`src/member_directory.py:210`）：`__init__` 新增 `max_rooms: int = 200`，与 `max_per_room` 一样做 `max(1, int(...))` 钳制。`observe()` 里 `pop` 后重插把房间挪到 dict 队尾表示「刚被观察到」，随后从队头淘汰到不超限：`while len(self._rooms) > self._max_rooms and next(iter(self._rooms)) != room`。显式挡掉「正在观察的房间」是因为按上面的重插逻辑它本不该成为队头，但将来有人改动重插逻辑时，这一条能保证刚记下的名字不被自己挤掉。不引入 `OrderedDict`、不加时间戳字段。`members()` 不刷新 LRU（读路径不改变淘汰顺序），`forget()` 一行未动。
+- **为什么这件事会真发生**：`src/plugins/at_mention.py:64` / `:68` / `:72` 的 `on_ingest`、`on_block`、`on_pre_ai` 三个钩子**无条件**调 `observe()`，不看插件是否 enabled——用户关掉插件，名录照样每个新会话涨一条。本版没有动那个文件（不在本次边界内），只把名录本身封顶。
+- **测试**：新增 `tests/test_member_directory_cap1397.py` 8 例（默认 200 上限、淘汰顺序、LRU 刷新、当前房间不被淘汰、0/负数钳到 1、forget 腾位、每房间成员上限仍生效、读路径不续命）。与 `tests/test_at_mention.py` 一起跑 `Ran 44 tests` / `OK`，既有 36 例一字节未改。
+
 ## 1.3.96
 
 补上十项诉求里「人格冲突」的最后一段：冲突以前只进运行日志，界面上看不见。

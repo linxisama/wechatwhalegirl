@@ -9,6 +9,9 @@
 设计原则（照搬原版）：**宁可认不出，也绝不猜错**。@ 错人是社交事故，比没 @ 上严重。
 因此：完全同名 > 唯一前缀匹配；名字短于 2 字不认；多个候选无法确定唯一时放弃。
 
+房间数也有上限（默认 200），按最近观察淘汰：每进一个新群或新私聊就多攒一份名录，
+不设上限的话长期运行内存只涨不降。
+
 中文没有空格分词，``@小明你好`` 里名字到底是"小明"还是"小明你好"无法从字面判断，
 所以做法是**拿已知名单去比对正文（最长优先）**，而不是先从正文切出名字再查。
 
@@ -204,9 +207,10 @@ class MemberDirectory:
     攒起来就是一份"最近说过话的人"名单。对"@ 刚才说话的人"这个最常见场景足够用。
     """
 
-    def __init__(self, max_per_room: int = 200):
+    def __init__(self, max_per_room: int = 200, max_rooms: int = 200):
         self._rooms: Dict[str, Dict[str, str]] = {}
         self._max = max(1, int(max_per_room))
+        self._max_rooms = max(1, int(max_rooms))
 
     @staticmethod
     def room_key(message: dict) -> str:
@@ -225,7 +229,11 @@ class MemberDirectory:
             if not user_id:
                 return
             room = self.room_key(message)
-            members = self._rooms.setdefault(room, {})
+            # 重插到队尾就等于「刚刚被观察到」：dict 保持插入顺序，淘汰时从队头挑最久没动的
+            members = self._rooms.pop(room, None)
+            if members is None:
+                members = {}
+            self._rooms[room] = members
             if name:
                 members[user_id] = name
             else:
@@ -233,6 +241,11 @@ class MemberDirectory:
             # 简单的容量控制：超了就丢掉最早记下的一批（dict 保持插入顺序）
             while len(members) > self._max:
                 members.pop(next(iter(members)))
+            # 房间数同样要有上限：每进一个新群或新私聊就多一条，不淘汰的话长跑只涨不降。
+            # 从队头淘汰。刚观察的 room 已重插到队尾，正常不会成为队头；显式挡一下是为了
+            # 防止以后有人改动上面的重插逻辑后，刚记下的那个房间被自己挤掉。
+            while len(self._rooms) > self._max_rooms and next(iter(self._rooms)) != room:
+                self._rooms.pop(next(iter(self._rooms)))
         except Exception:
             return
 

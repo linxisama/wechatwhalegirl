@@ -1,7 +1,7 @@
-# DSH_NEXT — 鲸鱼娘微信控制台 1.3.96 交接
+# DSH_NEXT — 鲸鱼娘微信控制台 1.3.97 交接
 
 仓库：D:\聊天机器人\微信机器人（**不是** D:\微信机器人）。
-HEAD：见 `git log -1`，工作树 clean。当前版本 `1.3.96`。
+HEAD：见 `git log -1`，工作树 clean。当前版本 `1.3.97`。
 
 ## 本轮已交付（1.3.90 → 1.3.93，10 个提交）
 | 提交 | 内容 |
@@ -21,6 +21,7 @@ HEAD：见 `git log -1`，工作树 clean。当前版本 `1.3.96`。
 | （1.3.95） | 学习系统优化：expression 自动批准开关（`expressionApproveHits`，默认 0 关）、200 条淘汰插入 `hits DESC`、`view()` N+1 203→4、`overview()` 100→2；`交付报告-1.3.95.md` |
 | `f940956` | docs：七份文档补 1.3.94 与 1.3.95 两段 |
 | （1.3.96） | 人设冲突界面可见：`GET /api/personas` 增 `conflicts`（`hasattr` 兜底）、人设页 `_apply_personas` 渲染计数 + tooltip 明细；`交付报告-1.3.96.md` |
+| （1.3.97） | 名录房间数加 LRU 上限（`MemberDirectory(max_rooms=200)`，observe 重插到队尾、从队头淘汰、当前房间显式保护）；新增 `tests/test_member_directory_cap1397.py` 8 例；`交付报告-1.3.97.md` |
 
 1.3.96 全量回归：`Ran 4427 tests`（A 半 2198 + B 半 2229，`FAILED (failures=2)`），两例均为 `tests/test_cross_machine_paths151.py` 的长路径环境依赖（本机 TEMP 仅 33 字符），与改动无关；把 TEMP 指到 166 字符目录后该模块 16 例全 OK。例数基线 1.3.90 = 4203 → 1.3.95 = 4413 → 1.3.96 = 4427（+14，恰为 `test_persona_conflict_gui1396.py` 的用例数）。
 
