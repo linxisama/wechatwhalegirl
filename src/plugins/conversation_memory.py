@@ -3,6 +3,7 @@ import re
 from . import PluginBase, PluginMeta, FieldSchema
 from ..chat_state import scope_of, person_of, quoted_context
 from ..style_manager import DEFAULT_PERSONA
+from ..persona_mood import is_owner_message, label as mood_label, resolve as resolve_mood
 from ..text_matching import configured_terms,normalized_text as normalize_text
 
 
@@ -57,8 +58,12 @@ class ConversationMemory(PluginBase):
             'manualItems':FieldSchema(type='int',label='每轮最多引用的手动记忆条数',description='默认 12。超出时保留最近修改的那几条。',min=1,max=50),
             'manualItemChars':FieldSchema(type='int',label='单条手动记忆最多引用字数',description='默认 60，超出部分以省略号截断。',min=10,max=300),
             'manualTotalChars':FieldSchema(type='int',label='手动记忆引用总字数上限',description='默认 900，超出时停止追加后面的条目。',min=100,max=4000),
+            'moodEnabled':FieldSchema(type='bool',label='把角色心情用于回复语气',description='心情是扮演参考，不影响事实回答。关掉后不再注入。'),
+            'moodOwnerOnly':FieldSchema(type='bool',label='心情只对主人的回复生效',description='默认开启。群里对陌生人端着同一份心情等于没有心情，而且会把角色状态泄露出去。'),
+            'moodIdleHours':FieldSchema(type='int',label='多久不聊天就随机重置心情（小时）',description='默认 4。重置值落在中段，不回到固定值。',min=1,max=48),
         }, default_settings={'enabled':True, 'autoRemember':True, 'recallLimit':5, 'maxEntries':500,
                              'personaIsolation':True,'crossChatPreferences':False,'privateToGroup':False,
+                             'moodEnabled':True,'moodOwnerOnly':True,'moodIdleHours':4,
                              'recallArchive':True,'archiveRecallLimit':3,
                              'localLearning':True,
         # 0 = 不自动批准表达例句。默认关闭是为了保持"表达须人工批准"的既有行为，
@@ -256,7 +261,35 @@ class ConversationMemory(PluginBase):
             'notes':[{'id':item.get('id'),'content':item.get('content')} for item in notes],
             'learned':[{'type':item.get('type'),'text':item.get('text')} for item in learned],
             'archive_recalled':archive_recalled}
+        # 角色心情（1.3.110）：4 小时不聊天随机重置，且只对主人的回复生效。
+        # 挂在 conversation_memory 而不是 emotion_state —— 后者在 plugin_policy 的
+        # RETIRED_PLUGINS 里永远不会被加载。这里也不新建插件：心情是提示词的一部分，
+        # 跟记忆走同一条注入路径最省事，且天然按人设隔离（每人格一份 state 文件）。
+        mood_hint = self._mood_hint(message, runtime)
         if manual:
             import json
-            return {'extra_system':'本机为当前人设保存的手动记忆与表达偏好：'+json.dumps(manual,ensure_ascii=False)}
-        return None
+            text = '本机为当前人设保存的手动记忆与表达偏好：'+json.dumps(manual,ensure_ascii=False)
+            return {'extra_system': text + ('\n' + mood_hint if mood_hint else '')}
+        return {'extra_system': mood_hint} if mood_hint else None
+
+    def _mood_hint(self, message, runtime):
+        """把当前心情渲染成一句提示词；关掉或不是主人时返回空串。
+
+        状态文件按人设存在 state_file('mood.json') —— 与其它插件状态同一套
+        命名空间（1.3.106 的 data_dir），人格之间天然隔离。
+        """
+        if not self.get('moodEnabled', True):
+            return ''
+        if self.get('moodOwnerOnly', True) and not is_owner_message(message, runtime):
+            return ''
+        try:
+            stored = self.load_state('mood.json', {})
+            state = resolve_mood(stored, idle_hours=self.get('moodIdleHours', 4))
+            if state.get('idle_reset'):
+                # 重置后立刻落盘：不然下一次查询又按老 updated 重算一遍，
+                # 虽然结果一样（种子是确定的），但会一直显示 idle_reset=True。
+                self.save_state('mood.json', state)
+            return ('角色状态：心情' + mood_label(state['mood']) +
+                    '。这是扮演语气参考，正常回答问题，不必每次报数值。')
+        except Exception:
+            return ''

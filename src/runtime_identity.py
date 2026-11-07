@@ -2,7 +2,7 @@
 import os
 from pathlib import Path
 
-APP_VERSION = '1.3.109'
+APP_VERSION = '1.3.110'
 APP_ID = 'WhaleGirlWeChat'
 DEFAULT_PORT = 8091
 

@@ -1,3 +1,15 @@
+## 1.3.110
+
+接线：把 1.3.109 的两个纯逻辑模块真正接进运行路径。
+
+- **问题**：1.3.109 交付的 `persona_memory` 与 `persona_mood` 是孤岛——除了自己内部互相调用，**没有任何外部调用方**。纯逻辑加测试只能算半成品，用户要的是「日记每存储一周会删除一次」和「4 小时不聊天随机重置」真的发生。
+- **日记接线**：`src/agent_diary.py` 的 `generate()` 写完 SQLite 与 `.md` 之后，再写一份到 `data/personas/<persona>/memory/daily/`（`write_daily`）。三条路径互相独立：任何一条失败不影响另外两条，SQLite 始终是正式记录。
+- **周清月清接线**：`DiaryWriter` 新增 `rollup(persona=None)` 与 `keywords(persona=None)`；`tick()` 在没有待写日记时调一次 `rollup()`。每天最多跑一次——`data/personas/.last-rollup` 记「日期:人格名」，跨重启也不会重复跑。压缩失败返回 `{'ok': False, 'reason': ...}` 而不是抛异常：压缩不该影响日记本身。
+- **心情接线**：`src/plugins/conversation_memory.py` 的 `on_pre_ai` 注入当前心情（新增 `_mood_hint`）。**挂在 conversation_memory 而不是 emotion_state**——后者在 `plugin_policy.py:5` 的 `RETIRED_PLUGINS` 里永远不会被加载；也不新建插件：心情是提示词的一部分，跟记忆走同一条注入路径最省事，且天然按人设隔离（状态文件走 `state_file('mood.json')`，即 1.3.106 的 `data_dir` 命名空间）。
+- **心情三个配置项**：`moodEnabled`（默认 True）、`moodOwnerOnly`（默认 True）、`moodIdleHours`（默认 4，1-48）。关掉 `moodOwnerOnly` 后群里也会注入；关掉 `moodEnabled` 完全不注入。
+- **重置后立刻落盘**：`_mood_hint` 发现 `idle_reset=True` 就 `save_state`。不落盘的话下一次查询又按老 `updated` 重算，虽然结果一样（种子确定），但会一直显示 `idle_reset=True`。
+- **异常不外泄**：`_mood_hint` 全程 try/except 返回空串。心情是锦上添花，不能因为它让整轮回复挂掉。
+- 测试：新增 `tests/test_persona_wiring_1110.py` 15 例。全量回归 `Ran 4649 tests`（三片 1527 + 1649 + 1473，skipped=22），唯二非通过项为 `tests/test_cross_machine_paths151.py` 长路径（本机 TEMP 仅 33 字符，环境依赖）。
 ## 1.3.109
 
 人格独立记忆 + 日记周期 + 心情重置。

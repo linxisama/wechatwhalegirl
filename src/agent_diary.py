@@ -9,6 +9,7 @@ import time
 from .agent_authority import authority,AuthorityError
 from .agent_workspace import workspace,WorkspaceError
 from .persistence import atomic_text
+from .persona_memory import monthly_keywords, rollup_month, rollup_week, write_daily
 
 TZ=timezone(timedelta(hours=8))
 
@@ -144,6 +145,13 @@ class DiaryWriter:
                     target=folder/(str(day)+'-'+hashlib.sha256(persona.encode()).hexdigest()[:12]+'.md');area._safe(target)
                     atomic_text(target,f'# {day}\n\n'+answer.strip(),backup=False)
                 except (OSError,WorkspaceError):pass
+                # 人格独立记忆目录（1.3.110）：同一天日记另写一份到
+                # data/personas/<persona>/memory/daily/，让周清→月清有东西可压。
+                # 与上面的 .md 是两条独立路径：文件写失败不影响 SQLite 里的正式记录，
+                # 反过来 SQLite 成功而这里失败也只是少一份可压缩的副本。
+                try:
+                    write_daily(self.bot.root,persona,str(day),answer.strip())
+                except (OSError,ValueError):pass
                 return self.read(str(day))
             except (asyncio.CancelledError,AuthorityError):raise
             except Exception as exc:
@@ -151,6 +159,45 @@ class DiaryWriter:
                 self.bot.db.execute('UPDATE agent_diary_entries SET status=\'failed\',error=?,updated=? WHERE workspace=? AND day=? AND persona=?',
                     (message,time.time(),key,str(day),persona));self.bot.db.commit()
                 return dict(success=False,status='failed',message=message,content='')
+
+    def _rollup_marker(self):
+        return self.bot.root/'data'/'personas'/'.last-rollup'
+
+    def rollup(self,persona=None):
+        """周清 + 月清（1.3.110）。每天最多跑一次，不消耗模型。
+
+        为什么放这里而不是定时任务：日记本来就是按天攒的，周清月清只依赖
+        日记文件，跟着日记的生命周期走最自然；单独起一个调度器要额外处理
+        停机补偿与并发。marker 文件记最后执行日期，跨重启也不会重复跑。
+
+        不抛异常：压缩失败不该影响日记本身，返回 {'ok': False, 'reason': ...}。
+        """
+        name=persona or self.bot.style.active_name
+        marker=self._rollup_marker()
+        today=str(datetime.now(TZ).date())
+        try:
+            if marker.exists() and marker.read_text('utf-8').strip()==today+':'+name:
+                return {'ok':False,'reason':'今天已经跑过'}
+        except OSError:
+            pass
+        try:
+            weekly=rollup_week(self.bot.root,name)
+            monthly=rollup_month(self.bot.root,name) if weekly.get('rolled') else {'rolled':False}
+            try:
+                marker.parent.mkdir(parents=True,exist_ok=True)
+                atomic_text(marker,today+':'+name,backup=False)
+            except OSError:
+                pass
+            return {'ok':True,'weekly':weekly,'monthly':monthly}
+        except (OSError,ValueError) as exc:
+            return {'ok':False,'reason':type(exc).__name__}
+
+    def keywords(self,persona=None):
+        """当前人格的月记关键词；给提示词注入用。取不到返回空列表。"""
+        try:
+            return monthly_keywords(self.bot.root,persona or self.bot.style.active_name)
+        except (OSError,ValueError):
+            return []
 
     async def tick(self):
         if not self.bot.config.get('agent.diary.enabled',True) or self.bot.ai_lock.locked() or self.lock.locked():return
@@ -166,3 +213,5 @@ class DiaryWriter:
             day=today-timedelta(days=offset)
             if self.records(day,self.bot.style.active_name):
                 await self.generate(str(day));return
+        # 没有待写日记时顺手做一次周清/月清（每天最多一次，marker 文件守着）。
+        self.rollup()
