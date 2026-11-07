@@ -1,7 +1,7 @@
-# DSH_NEXT — 鲸鱼娘微信控制台 1.3.99 交接
+# DSH_NEXT — 鲸鱼娘微信控制台 1.3.100 交接
 
 仓库：D:\聊天机器人\微信机器人（**不是** D:\微信机器人）。
-HEAD：见 `git log -1`，工作树 clean。当前版本 `1.3.99`。
+HEAD：见 `git log -1`，工作树 clean。当前版本 `1.3.100`。
 
 ## 本轮已交付（1.3.90 → 1.3.93，10 个提交）
 | 提交 | 内容 |
@@ -24,8 +24,9 @@ HEAD：见 `git log -1`，工作树 clean。当前版本 `1.3.99`。
 | （1.3.97） | 名录房间数加 LRU 上限（`MemberDirectory(max_rooms=200)`，observe 重插到队尾、从队头淘汰、当前房间显式保护）；新增 `tests/test_member_directory_cap1397.py` 8 例；`交付报告-1.3.97.md` |
 | （1.3.98） | 四处审计缺陷：`computer_helper.py:143` 错码 `00000007b`→`0000007b`（0x7B 专项模板原本永远选不中）、`:319` 强信号词加查 `compact`（`INACCESSIBLE_BOOT_DEVICE` / `inaccessible boot device` 原本漏判）、`sandbox_doctor.py` 删掉两个重复且无人调用的 `_sandbox_windows`、`memory_maintenance.py` 新增 `_commit()` 让 commit 失败时回滚并按 0 报告（`maintain` 增 `persisted` 字段，`dialogue_management.py:148` 据此返回 `success: False`）；复核又查出一处回归：`evict` 的提交/回滚会连带丢掉 `ChatState.remember` 还没落盘的 INSERT，改为 `evict(commit=False)` 由 caller 唯一提交；新增 `tests/test_audit_fixes1398.py` 16 例；`交付报告-1.3.98.md` |
 | （1.3.99） | 表情库三处淘汰缺陷：`sticker_library.py:299-305` 单图超容量上限原本会把自己淘汰掉、整个收藏夹清空并抛 `KeyError`（改为落图前 `raise ValueError`，库不动）、`_evict()` 新增 `keep` 参数让刚入库那条不被自己挤掉（`:352-372`）、`_evict()` 改为只算不删并返回 `(entries, victims)`，`put()` 在索引落盘成功后才删旧图（`:338-345`，原先索引写失败会留下悬空条目）、新增 `_cap_bytes()` 统一容量算法（`:348-350`）；`sticker_api.py:134` 报错改用 `MAX_BYTES`、`:24` 注释改「单次导入总量上限」；契约 `WECHAT-CONTRACT.md:913` / `:1317` 的 6MB 改 12MB；新增 `tests/test_sticker_evict1399.py` 6 例；`交付报告-1.3.99.md` |
+| （1.3.100） | 坏 JSON 一律 400：`wechat_app.py:2595-2605` 在 `create_app` 里注册 `@app.exception_handler(JSONDecodeError)` 与 `@app.exception_handler(UnicodeDecodeError)`，两者都回 `JSONResponse({success: False, detail: BAD_JSON_MESSAGE, message: 同句}, status_code=400)`，文案常量在 `:72`、`from json import JSONDecodeError` 在 `:26`；17 个直接 `await request.json()` 的写接口原本 500（空 body 与非法 UTF-8 同样 500）；`persona_files.py:92-100` 把 `body=await request.json()` 单独包 `try/except (ValueError, UnicodeError)` 抛 `HTTPException(400, '导入请求不是有效的 JSON')`，不再把 `Expecting property name enclosed in double quotes` 英文原文当 detail 返回；新增 `tests/test_bad_json_1400.py` 9 例；`交付报告-1.3.100.md` |
 
-1.3.99 全量回归：`Ran 4457 tests`（三片 1433 + 1382 + 1642，547.6s，`FAILED (failures=2, errors=1)`），三例均为环境/时序依赖：两例 `tests/test_cross_machine_paths151.py` 长路径（本机 TEMP 仅 33 字符，历史上一直失败，单独跑该模块稳定复现 `FAILED (failures=2)`），一例 `tests/test_desktop_startup.py::StartupTests::test_supervisor_records_native_exit_without_loading_qt_or_config` 在分片并行下抖动（单独跑该模块两次均 `Ran 14 tests` / OK）。例数基线 1.3.90 = 4203 → 1.3.96 = 4427 → 1.3.98 = 4451 → 1.3.99 = 4457（+6 = 本批新增的 6 例）。
+1.3.100 全量回归：`Ran 4466 tests`（三片 1595 + 1453 + 1418，629.9s，`FAILED (failures=3, skipped=5)`），三例均为环境/时序依赖：两例 `tests/test_cross_machine_paths151.py` 长路径（本机 TEMP 仅 33 字符，历史上一直失败，单独跑该模块稳定复现 `FAILED (failures=2)`），一例 `tests/test_title_template190.py::PerformanceTest::test_rank_5600_names_under_three_seconds` 在分片并行下抖动（单独跑该模块两次均 `Ran 21 tests` / OK）。例数基线 1.3.90 = 4203 → 1.3.96 = 4427 → 1.3.98 = 4451 → 1.3.99 = 4457 → 1.3.100 = 4466（+9 = 本批新增的 9 例）。
 
 ## 1.3.94 已接线（原「待接线」清单已清空）
 1. `src/wechat_app.py:2275-2276` `record_round(...)` 已补 `plan=locals().get('prompt_plan')`。
@@ -60,3 +61,4 @@ subprocess.run([r'D:\聊天机器人\微信机器人\.venv-wechat\Scripts\python
 - 行尾：`.gitattributes` 是 `* -text`；`src/*.py` 与 `wechat_gui.py` 是 **LF**，`.md` 是 **CRLF**。例外（HEAD 本就是 CRLF）：`src/logging_setup.py`、`src/prompt_budget.py`、`src/style_manager.py`。
 - 测试模块名要精确：`tests/test_dsh_autoconnect166.py` 不是 `test_dsh_autoconnect`。
 - 本会话 `compress`/`acp_status`/`decompress` 在 run_code 里全部 undefined（77 个工具里没有），无法主动压缩上下文。
+- 1.3.100 本批测试：`tests.test_bad_json_1400` 单独 `Ran 9 tests` / `OK`；与 7 个相关模块一起 `Ran 151 tests in 81.415s` / `OK`；全量回归 `Ran 4466 tests`（三片 1595 + 1453 + 1418，629.9s），唯三非通过项均为环境/时序依赖（未打包、未跑 selfcheck）。

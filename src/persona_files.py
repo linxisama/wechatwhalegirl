@@ -90,7 +90,14 @@ def add_routes(app):
     @app.post('/api/persona-files/import')
     async def import_file(request:Request):
         try:
-            body=await request.json()
+            # 单独接一层：坏 JSON 抛的是 JSONDecodeError（ValueError 的子类），直接落到
+            # 下面的 except 里就会把 'Expecting property name enclosed in double quotes'
+            # 这种英文原文当 detail 回给用户；非法 UTF-8 抛 UnicodeDecodeError 则连这层
+            # except 都不进，只能靠应用级 handler。两种情况都换成同一句中文。
+            try:
+                body=await request.json()
+            except (ValueError, UnicodeError):
+                raise HTTPException(400,'导入请求不是有效的 JSON') from None
             if not isinstance(body, dict):
                 raise ValueError('导入请求必须是对象')
             if type(body.get('auto_name', False)) is not bool:

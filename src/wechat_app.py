@@ -23,6 +23,7 @@ import sqlite3
 import sys
 import time
 from contextlib import asynccontextmanager
+from json import JSONDecodeError
 from pathlib import Path
 from typing import Literal, Optional
 from urllib.parse import urlsplit
@@ -65,6 +66,10 @@ LISTENER_STOP_TIMEOUT = 3.0
 # 被清空（配置、聊天库一起没了）的事故，所以每次保存都留一份上一版，启动时能自动取回。
 CONFIG_BACKUP_SUFFIX = ".bak"
 
+# 请求体不是合法 JSON 时的统一提示。这些接口的入参只有控制台自己在发，能走到这里
+# 基本只有三种情况：前端序列化出 bug、手工 curl 打错、或者请求体编码坏了。三种都
+# 是调用方的问题而不是服务端故障，所以一律 400 并把话说清楚，不要抛 500 让人去翻日志。
+BAD_JSON_MESSAGE = "请求体不是有效的 JSON，请检查格式后重试"
 
 def config_backup_path(destination) -> Path:
     destination = Path(destination)
@@ -2581,6 +2586,24 @@ def create_app(runtime=None):
 
     app = FastAPI(title="鲸鱼娘 · 微信控制台", lifespan=lifespan, docs_url=None,
                   redoc_url=None, openapi_url=None)
+
+    # 一批写接口直接 await request.json()，没包 try：坏 JSON 抛 JSONDecodeError，
+    # 非法 UTF-8 抛 UnicodeDecodeError，两个都不在 HTTPException 体系里，Starlette
+    # 也没有为它们注册 handler，于是逃出路由变成 500 —— 用户看到的是「服务器错误」，
+    # 而真正的原因只是请求体打错了。在应用级接住，比在 17 个路由里各写一遍 try 稳：
+    # 以后新增的路由只要直接 await request.json() 也自动受益。
+    @app.exception_handler(JSONDecodeError)
+    async def bad_json_handler(request: Request, exc: JSONDecodeError):
+        return JSONResponse(
+            {"success": False, "detail": BAD_JSON_MESSAGE, "message": BAD_JSON_MESSAGE},
+            status_code=400)
+
+    @app.exception_handler(UnicodeDecodeError)
+    async def bad_utf8_handler(request: Request, exc: UnicodeDecodeError):
+        return JSONResponse(
+            {"success": False, "detail": BAD_JSON_MESSAGE, "message": BAD_JSON_MESSAGE},
+            status_code=400)
+
     from .dsh_api import add_routes as add_dsh_routes
     add_dsh_routes(app)
     from .sandbox_api import add_routes as add_sandbox_routes
