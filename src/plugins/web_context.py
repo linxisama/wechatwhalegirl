@@ -57,6 +57,7 @@ class WebContext(PluginBase):
         default_settings={'enabled': True, 'includeTime': True, 'newsCount': 5,
                           'hotCount': 5, 'hotSource': 'weibo', 'refreshMinutes': 30,
                           'timeoutSec': 8, 'verbose': False},
+    permissions=("net",),
     )
 
     STATE = 'web_context.json'

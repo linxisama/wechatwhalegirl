@@ -421,6 +421,11 @@ class WeChatRuntime:
         # 谁被权重挤掉都记在这里，控制台与日志才回答得出「为什么是它在回」。
         # 有界：只留最近 50 条，长跑不会把内存吃满。
         self.bid_trace: list[dict] = []
+        # 权限审计（1.3.105）：插件用了没声明的能力时记在这里。
+        # 默认只审计不拦截（enforce=False）—— 44 个内置插件里有 7 个真的联网或
+        # 读写文件，一刀切会让它们在升级当天全部被隔离。见 src/plugin_guard.py。
+        self.permission_audit: list[dict] = []
+        self.permission_enforce = False
         self.plugins = PluginManager(self.root / "data/wechat-only",
                                      default_overrides={"burst_merge": {"capMs": 3000}})
         self.chat_state = ChatState(self.db)

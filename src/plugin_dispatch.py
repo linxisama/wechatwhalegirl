@@ -54,6 +54,35 @@ class PluginDispatch:
                       if self._enabled(plugin)]
         return sorted(candidates, key=lambda plugin: -self._weight_of(plugin))
 
+    def _attach_guard(self, plugin, runtime):
+        """把这个插件的权限视图挂到 runtime 上，供插件自己 require() 用。
+
+        每次调用前挂一次（而不是加载时挂一次）：runtime 是共享对象，
+        插件 A 的视图留在上面会让插件 B 拿到 A 的权限。
+        enforce 默认 False —— 44 个内置插件里有 7 个真的联网或读写文件，
+        一刀切会让它们在升级当天全部被隔离（见 src/plugin_guard.py 的说明）。
+        """
+        try:
+            from .plugin_guard import PermissionGuard
+        except Exception:
+            return
+        meta = getattr(plugin, 'META', None)
+        granted = getattr(meta, 'permissions', ()) or ()
+        enforce = bool(getattr(self, 'permission_enforce', False))
+        sink = None
+        if isinstance(getattr(runtime, 'permission_audit', None), list):
+            def sink(entry, _trace=runtime.permission_audit):
+                try:
+                    _trace.append(entry)
+                    del _trace[:-50]
+                except Exception:
+                    pass
+        try:
+            runtime.permission_guard = PermissionGuard(
+                self.plugin_id(plugin), granted, enforce=enforce, sink=sink)
+        except Exception:
+            pass
+
     def _record_bid(self, runtime, hook, winner, losers, reason):
         """把一次仲裁写进 runtime.bid_trace，供控制台与日志回答「为什么是它」。
 
@@ -98,6 +127,7 @@ class PluginDispatch:
             pid = self.plugin_id(plugin)
             losers.remove(pid)
             with self.protected(plugin, 'on_ingest'):
+                self._attach_guard(plugin, runtime)
                 with self.local_changes(message, runtime=runtime) as (working, _):
                     result = self.bounded_sync(plugin.on_ingest, working, runtime,
                                                timeout=self.SYNC_TIMEOUT)
@@ -117,6 +147,7 @@ class PluginDispatch:
         for plugin in tuple(self._plugins.values()):
             if self._enabled(plugin):
                 with self.protected(plugin, 'on_observed'):
+                    self._attach_guard(plugin, runtime)
                     with self.local_changes(message, runtime=runtime) as (working, _):
                         self.bounded_sync(plugin.on_observed, working, runtime,
                                           timeout=self.SYNC_TIMEOUT)
@@ -134,6 +165,7 @@ class PluginDispatch:
             pid = self.plugin_id(plugin)
             losers.remove(pid)
             with self.protected(plugin, 'on_block'):
+                self._attach_guard(plugin, runtime)
                 with self.local_changes(message, runtime=runtime) as (working, _):
                     blocked = self.bounded_sync(plugin.on_block, working, runtime,
                                                 timeout=self.SYNC_TIMEOUT)
@@ -154,6 +186,7 @@ class PluginDispatch:
             if not self._enabled(plugin):
                 continue
             with self.protected(plugin, 'on_pre_ai'):
+                self._attach_guard(plugin, runtime)
                 with self.local_changes(message, conversation, runtime) as (working, turns):
                     hint = self.bounded_sync(plugin.on_pre_ai, working, turns, runtime,
                                              timeout=self.SYNC_TIMEOUT)
@@ -206,6 +239,7 @@ class PluginDispatch:
         for plugin in tuple(self._plugins.values()):
             if self._enabled(plugin):
                 with self.protected(plugin, 'on_prepare'):
+                    self._attach_guard(plugin, runtime)
                     with self.local_changes(message, runtime=runtime) as (working, _):
                         await self.bounded(plugin.on_prepare, working, runtime, timeout=self.PREPARE_TIMEOUT)
 
@@ -213,6 +247,7 @@ class PluginDispatch:
         for plugin in tuple(self._plugins.values()):
             if self._enabled(plugin):
                 with self.protected(plugin, 'on_sent'):
+                    self._attach_guard(plugin, runtime)
                     with self.local_changes(message, runtime=runtime) as (working, _):
                         self.bounded_sync(plugin.on_sent, working, reply, runtime,
                                           timeout=self.SYNC_TIMEOUT)
@@ -254,6 +289,7 @@ class PluginDispatch:
             if not self._enabled(plugin):
                 continue
             with self.protected(plugin, 'on_post_reply'):
+                self._attach_guard(plugin, runtime)
                 with self.local_changes(message, runtime=runtime) as (working, _):
                     value = await self.bounded(plugin.on_post_reply, working, reply, runtime, timeout=self.POST_TIMEOUT)
                     new_reply = reply
@@ -282,4 +318,5 @@ class PluginDispatch:
         for plugin in tuple(self._plugins.values()):
             if self._enabled(plugin):
                 with self.protected(plugin, 'tick'):
+                    self._attach_guard(plugin, runtime)
                     await self.bounded(plugin.tick, runtime, timeout=self.TICK_TIMEOUT)

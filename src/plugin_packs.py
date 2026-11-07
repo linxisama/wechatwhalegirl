@@ -193,7 +193,8 @@ def _check_manifest(data: Any, host_version: str, pack_dir: Optional[Path] = Non
     errors: List[str] = []
     warnings: List[str] = []
     meta: Dict[str, Any] = {"id": "", "name": "", "version": "", "entry": ENTRY_DEFAULT,
-                            "api_version": "", "dependencies": [], "warnings": warnings}
+                            "api_version": "", "dependencies": [], "permissions": [],
+                            "warnings": warnings}
     if not isinstance(data, dict):
         return "invalid", ["插件清单格式无效：内容应当是一个 JSON 对象"], meta
 
@@ -256,6 +257,22 @@ def _check_manifest(data: Any, host_version: str, pack_dir: Optional[Path] = Non
             errors.append("settings_example 必须是包内相对路径")
         else:
             meta["settings_example"] = normalized
+
+    # permissions：五项能力声明（net / fs_read / fs_write / exec / wechat_send）
+    # 声明是诚实义务，不声明不代表不能用（见 src/plugin_guard.py 的两档行为），
+    # 但写错名字要立刻告诉作者，否则他以为申请到了其实没有。
+    raw_permissions = data.get("permissions")
+    if raw_permissions is not None:
+        if not isinstance(raw_permissions, list) or any(
+                not isinstance(item, str) for item in raw_permissions):
+            errors.append("字段 permissions 必须是权限名称的列表")
+        else:
+            from .plugin_guard import PERMISSION_NAMES, normalize, unknown
+            bad = unknown(raw_permissions)
+            if bad:
+                errors.append("permissions 含未知权限：" + "、".join(bad)
+                              + "（可用 " + " / ".join(PERMISSION_NAMES) + "）")
+            meta["permissions"] = list(normalize(raw_permissions))
 
     # capabilities 是能力名称列表（例如 reply / summary），只用于展示，不参与加载判断
     raw_caps = data.get("capabilities")

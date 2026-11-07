@@ -49,6 +49,7 @@ class StickerSteal(PluginBase):
         default_settings={"enabled": True, "watchImages": False,
                           "stickerOnly": True, "allowPrivate": False,
                           "blockedSenders": "", "maxLibrarySize": 800, "maxLibraryMb": 96},
+    permissions=("fs_read", "fs_write"),
     )
 
     def __init__(self, manager):

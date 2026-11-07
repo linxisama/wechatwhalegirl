@@ -81,6 +81,7 @@ class ImageUnderstanding(PluginBase):
         },
         default_settings={"visionMaxSide": 2048, "enabled": True, "visionModel": "", "maxImages": 3,
                           "longImage": False, "maxTiles": 3, "visionTimeout": 25},
+    permissions=("net", "fs_read", "fs_write"),
     )
 
     def _max_side(self) -> int:

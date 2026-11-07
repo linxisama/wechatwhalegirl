@@ -80,6 +80,7 @@ class ImageLibrary(PluginBase):
                 description='上传可多选，自动按文件名生成标签；建议改成“开心”“疑惑”等含义明确的标签。图片导入本机，发送时用本机文件直接发出。仍可编辑“标签 | 路径或链接”。',
                 file_picker='labeled_files',file_extensions=['.png','.jpg','.jpeg','.gif','.webp'],file_max_mb=6),
             'autoSelect':FieldSchema(type='bool',label='让聊天模型按语境选择图库图片')},
+    permissions=("net", "fs_read", "fs_write"),
         default_settings={'enabled':True,'library':'','autoSelect':True})
 
     def validate_settings(self,settings):

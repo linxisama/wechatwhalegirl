@@ -87,6 +87,7 @@ class WebLookup(PluginBase):
             'triggerWords': '搜一下,搜搜,查一下,查查,查一查,帮我查,搜索一下,最新,现在多少',
             'maxResults': 3, 'timeoutSec': 6, 'cacheMinutes': 10, 'engine': 'bing',
         },
+    permissions=("net",),
     )
 
     def __init__(self, manager):

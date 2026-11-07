@@ -1,3 +1,16 @@
+## 1.3.105
+
+权限五项 + 执行前校验：把「明面上的代价」变成真东西。
+
+- **问题**：清单里的 `permissions` 字段过去只是被解析成一个列表，**从来没有被检查过**。插件声明 `permissions: []` 和声明 `permissions: ["net","fs_write"]` 在运行期完全一样——那正是用户第三条判定标准要的「把代价写在明面上」缺失的一环。
+- **五项权限**：新增 `src/plugin_guard.py`，`PERMISSIONS = (("net","联网"), ("fs_read","读本机文件"), ("fs_write","写本机文件"), ("exec","起子进程"), ("wechat_send","直接发微信消息"))`。规范名顺序固定，改名等于破坏已有清单。
+- **两档行为**（与 1.3.103 的双档清单同一个思路）：`enforce=False`（默认）只审计——缺声明时记一条 `permission_violation` 到 `runtime.permission_audit`，不拦截；`enforce=True` 真拦截——缺声明直接抛 `PermissionDenied`，由 `plugin_dispatch.protected()` 记故障并跳过该插件本轮。**为什么不默认拦截**：44 个内置插件里有 7 个真的联网或读写文件，一刀切会让它们在升级当天全部被隔离。
+- **`PermissionDenied` 继承 `PermissionError`**，既有 `except PermissionError` 也能接住。
+- **每次调用前换视图**：`PluginDispatch._attach_guard(plugin, runtime)` 在每个钩子调用前把该插件的 `PermissionGuard` 挂到 `runtime.permission_guard`。不能只在加载时挂一次——`runtime` 是共享对象，插件 A 的视图留着会让插件 B 拿到 A 的权限。8 个钩子全部覆盖。
+- **审计有界**：`runtime.permission_audit` 只留最近 50 条；`sink` 自身抛异常不影响插件执行。
+- **清单校验**：`_check_manifest` 新增 `permissions` 字段校验——非列表报错、未知权限名报错并列出五项可用名、合法值归一成小写去重。`meta["permissions"]` 默认 `[]`。
+- **内置插件补声明**：`web_context` / `web_lookup` / `context_chime` 声明 `net`；`image_library` / `image_understanding` 声明 `net, fs_read, fs_write`；`sticker_steal` 声明 `fs_read, fs_write`。依据是正则扫源码里真实的 `urllib` / `open(...'w')` / `Image.open` 调用，不是猜的。
+- 测试：新增 `tests/test_plugin_permissions_1105.py` 23 例。与 15 个相关模块一起跑 `Ran 311 tests in 27.314s` / `OK`；全量回归 `Ran 4536 tests`（三片 1506 + 1436 + 1594，skipped=21），唯二非通过项为 `tests/test_cross_machine_paths151.py` 长路径（本机 TEMP 仅 33 字符，环境依赖，与本批无关）。
 ## 1.3.104
 
 竞标-仲裁：排他钩子按权重决定谁说话，其余记进 trace。

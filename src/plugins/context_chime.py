@@ -206,6 +206,7 @@ class ContextChime(PluginBase):
             "blockOnJudgeFailure": True,
             "blockOnTimeout": False,
         },
+    permissions=("net",),
     )
 
     def __init__(self, manager):

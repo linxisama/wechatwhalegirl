@@ -46,7 +46,15 @@ class PluginMeta:
     # 现在按 (权重降序, 注册顺序) 排序后依次问，第一个给出结果的赢，其余记进
     # runtime.bid_trace 备查。权重相同仍按注册顺序，所以不填权重的存量插件行为不变。
     capability_weight: int = 0
-
+    # 权限声明（1.3.105）：插件在清单或 META 里写自己要用哪些能力。
+    # 五项：net（联网）/ fs_read（读本机文件）/ fs_write（写本机文件）/
+    #       exec（起子进程）/ wechat_send（绕过宿主闸门直接发消息）。
+    # 空列表 = 什么都不声明。声明是**诚实义务**：不声明的插件用不到对应能力，
+    # 用到时宿主会拒绝并记一次故障（见 src/plugin_guard.py）。
+    # 为什么不强制所有存量插件补声明：44 个内置插件里有 7 个真的联网或读写文件，
+    # 一刀切会让它们在升级当天全部被隔离。所以**默认只审计不拦截**，
+    # 由 plugin_guard.enforce 开关控制（默认 False），与 1.3.103 的双档清单同一个思路。
+    permissions: tuple = ()
     def schema_dict(self) -> dict:
         result = {}
         for k, v in self.config_schema.items():
