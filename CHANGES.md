@@ -1,3 +1,15 @@
+## 1.3.115
+
+沙盒后端遇到大图不再直接失败：先在宿主压一版，压得进预算就照发，压不进才拒绝。
+
+- **问题**：`src/wechat_transports.py:474-477` 的附件闸门放过之后，`_files_payload` 对超过 `MAX_SEND_FILE_BYTES`（1MB）的文件一律整批拒绝。手机照片常见 2～5MB，于是 1.3.113 刚打通的「沙盒里发图」在最常见的场景上仍然失败，且界面没有比「本次未发送」更可用的出口——用户既不能压图也不能改设置。
+- **只在本来就要拒绝的那一项上尝试压缩**：`_files_payload` 的判据一个字没改，只在「单份超限」或「加上它整批就超 `SEND_FILES_BUDGET`」时先调 `_compressed_jpeg(data, limit)`；压出来就用压缩结果并把文件名换成 `.jpg`（字节确实是 JPEG），压不出来（非图片、GIF 动图、解码失败、没装 Pillow）保持原数据走原来的拒绝分支，文案与判据都不变。
+- **预算按整批均分**：`_shrink_limit(count)` = `min(MAX_SEND_FILE_BYTES, SEND_FILES_BUDGET // count)`。只按单份 1MB 压，三张 900KB 的图压完仍会撞上 2MB 合计上限；按张数均分才能保证压完真的发得出去（1 张 → 1MB，3 张 → 682KB，6 张 → 341KB）。
+- **阶梯压缩**：边长 1600 / 1280 / 1024 / 800 × JPEG 质量 92 / 86 / 80 / 72，取第一个进预算的组合；同一尺寸只试一轮（原图本来就小于某个边长时不会重复编四次）。超过 4000 万像素的图不压——解码本身就可能把内存吃光。
+- **透明底转白、EXIF 摆正**：与 `src/image_input.py:96-103` 同一套做法，`RGBA` / `LA` / 带 `transparency` 的先合成到白底再转 `RGB`（直接转 RGB 会变黑底），`ImageOps.exif_transpose` 顺带把手机照片的旋转摆正；转完再按阶梯压。
+- **动图不压**：`COMPRESS_FORMATS` 只收 JPEG / PNG / WEBP / BMP。GIF 换格式就丢动画，宁可照旧拒绝并说清是哪个文件——悄悄把动图变成静图比失败更糟。
+- **协议与客人端零改动**：压缩结果本来就落在既有的「6 个 / 单份 1MB / 合计 2MB」之内，`protocol.py` 的常量与 `guest_service._send_files` 的校验一行都不用动。
+- 测试：新增 `tests/test_isolated_files_compress_1115.py` 12 例（预算计算、产物真能按 JPEG 打开、透明底压出来是白不是黑、小图逐字节不变、动图与非图片照旧拒绝、坏图回落、三张整批各自均分且合计不超、缺 Pillow 回落、`SandboxBridge.send_files` 带给客人端的确实是压缩后的字节）；17 个 isolated 模块一起跑 `RESULT tests=251 failures=0 errors=0 skipped=1`。
 ## 1.3.114
 
 点完 UAC 不用再手猜时间点「重新检测」：面板在等授权、等结果这段时间每 2.5 秒自己读一次提权日志。

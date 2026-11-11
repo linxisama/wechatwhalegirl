@@ -52,14 +52,67 @@ LISTEN_PREPARE_BUDGET = 12.0
 LISTEN_ATTEMPTS = 2
 
 
+# 大图先压一版再判：聊天里的图片不需要原图，而协议对单份和整批都有硬上限，
+# 「这张图太大，本次未发送」对用户没有任何可用出口。
+COMPRESS_QUALITIES = (92, 86, 80, 72)
+COMPRESS_SIDES = (1600, 1280, 1024, 800)
+COMPRESS_FORMATS = frozenset(('JPEG', 'PNG', 'WEBP', 'BMP'))
+
+
+def _shrink_limit(count):
+    """压缩目标：单份上限与整批人均预算取小，否则压完还是整批被拒。"""
+    return max(1, min(MAX_SEND_FILE_BYTES, SEND_FILES_BUDGET // max(1, int(count))))
+
+
+def _compressed_jpeg(data, limit):
+    """把一张图压进 limit 字节，返回 JPEG 字节；压不了就返回空串，由调用方照旧拒绝。"""
+    try:
+        from io import BytesIO
+        from PIL import Image, ImageOps
+    except ImportError:
+        return b''
+    try:
+        with Image.open(BytesIO(data)) as original:
+            if original.format not in COMPRESS_FORMATS:
+                return b''  # GIF 之类换格式就丢动画，宁可照旧拒绝
+            if original.width * original.height > 40_000_000:
+                return b''
+            image = ImageOps.exif_transpose(original)
+            if image.mode in ('RGBA', 'LA') or 'transparency' in image.info:
+                rgba = image.convert('RGBA')
+                image = Image.new('RGB', rgba.size, 'white')
+                image.paste(rgba, mask=rgba.getchannel('A'))
+            else:
+                image = image.convert('RGB')
+    except (OSError, SyntaxError, ValueError, Image.DecompressionBombError):
+        return b''
+    tried = set()
+    for side in COMPRESS_SIDES:
+        thumb = image.copy()
+        thumb.thumbnail((side, side), Image.Resampling.LANCZOS)
+        if thumb.size in tried:
+            continue
+        tried.add(thumb.size)
+        for quality in COMPRESS_QUALITIES:
+            output = BytesIO()
+            thumb.save(output, 'JPEG', quality=quality)
+            if output.tell() <= limit:
+                return output.getvalue()
+    return b''
+
+
 def _files_payload(paths, as_image):
-    """把待发文件读成 base64：整批一起校验，任一项不合格就整批不发。"""
+    """把待发文件读成 base64：整批一起校验，任一项不合格就整批不发。
+
+    尺寸偏大且确实是静态图片时先压一版（文件名改成 .jpg），压不进上限才拒绝；
+    拒绝文案与判据都不变。
+    """
     items = [str(item or '') for item in list(paths or ())]
     if not items:
         return {'ok': False, 'message': '没有要发送的图片或文件，本次未发送'}
     if len(items) > MAX_SEND_FILES:
         return {'ok': False, 'message': f'一次最多发送 {MAX_SEND_FILES} 个图片或文件，本次未发送'}
-    total, files = 0, []
+    limit, total, files = _shrink_limit(len(items)), 0, []
     for raw in items:
         source = Path(raw)
         try:
@@ -68,6 +121,14 @@ def _files_payload(paths, as_image):
             return {'ok': False, 'message': '图片或文件读取失败，本次未发送：' + (source.name or '未知文件')}
         if not data:
             return {'ok': False, 'message': '图片或文件是空的，本次未发送：' + source.name}
+        name = source.name[:120]
+        if len(data) > MAX_SEND_FILE_BYTES or total + len(data) > SEND_FILES_BUDGET:
+            blob = _compressed_jpeg(data, limit)
+            if blob:
+                logging.getLogger(RUNTIME_LOGGER_NAME).info(
+                    'send files compressed ' + name + ' ' + str(len(data)) + '->' + str(len(blob)))
+                data = blob
+                name = (source.stem[:110] or 'image') + '.jpg'
         if len(data) > MAX_SEND_FILE_BYTES:
             return {'ok': False,
                     'message': f'单个图片或文件必须在 {MAX_SEND_FILE_BYTES >> 20}MB 以内，'
@@ -76,7 +137,7 @@ def _files_payload(paths, as_image):
         if total > SEND_FILES_BUDGET:
             return {'ok': False,
                     'message': f'图片或文件合计超过 {SEND_FILES_BUDGET >> 20}MB，本次未发送'}
-        files.append({'name': source.name[:120], 'image': bool(as_image),
+        files.append({'name': name, 'image': bool(as_image),
                       'data': base64.b64encode(data).decode('ascii')})
     return {'ok': True, 'files': files}
 
