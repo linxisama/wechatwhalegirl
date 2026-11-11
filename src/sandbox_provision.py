@@ -32,6 +32,13 @@ DISM = 'dism.exe'
 REGISTRY_PATH = r'SOFTWARE\Microsoft\Windows NT\CurrentVersion'
 DEFAULT_TIMEOUT = 900.0
 PROBE_TIMEOUT = 60.0
+# dism /get-featureinfo 需要管理员权限，普通用户只会拿到 740；WMI 的 Win32_OptionalFeature
+# 同一份状态普通人也能读，所以它是 dism 读不到时的第二条路。
+CIM_TIMEOUT = 30.0
+CIM_SCRIPT = ('(Get-CimInstance -ClassName Win32_OptionalFeature -Filter "Name=\'' + FEATURE_NAME +
+              '\'").InstallState')
+# InstallState 枚举：1 已启用、2 已禁用、3 不存在、4 未知。
+INSTALL_STATES = {1: 'Enabled', 2: 'Disabled', 3: 'Absent'}
 LOG_DIR_NAME = 'sandbox-provision'
 RECORD_NAME = 'last-enable.json'
 EXIT_MARKER = '[whale-dism-exit]'
@@ -82,7 +89,8 @@ def _default_runner(cmd, timeout=DEFAULT_TIMEOUT):
     """默认 runner：真实执行外部命令，失败也返回 dict，绝不抛给调用方。"""
     try:
         completed = subprocess.run([str(part) for part in cmd], capture_output=True,
-                                   timeout=timeout, check=False)
+                                   timeout=timeout, check=False,
+                                   creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
     except (OSError, subprocess.SubprocessError, ValueError) as error:
         return {'returncode': -1, 'stdout': '', 'stderr': type(error).__name__ + ': ' + str(error)}
     return {'returncode': int(completed.returncode or 0),
@@ -221,6 +229,59 @@ def _looks_absent(text, returncode):
             or 'the feature name is unknown' in low)
 
 
+def _powershell_path():
+    """绝对路径：PATH 里没有 powershell 时裸名 spawn 会直接 WinError 2。"""
+    root = Path(os.environ.get('SystemRoot') or r'C:\Windows')
+    exe = root / 'System32' / 'WindowsPowerShell' / 'v1.0' / 'powershell.exe'
+    return str(exe) if exe.is_file() else 'powershell.exe'
+
+
+def _install_state_label(value):
+    """InstallState 可能是 int、字符串数字或空；认不出返回空串，绝不猜。"""
+    try:
+        code = int(str(value).strip())
+    except (TypeError, ValueError):
+        return ''
+    return INSTALL_STATES.get(code, '')
+
+
+def _parse_install_state(text):
+    """解析 Win32_OptionalFeature 输出：既认 ConvertTo-Json 的字典，也认裸的 InstallState 数字。"""
+    raw = str(text or '').strip()
+    if not raw:
+        return ''
+    if raw.startswith('{') or raw.startswith('['):
+        try:
+            value = json.loads(raw)
+        except ValueError:
+            return ''
+        rows = value if isinstance(value, list) else [value]
+        for row in rows:
+            if isinstance(row, dict) and str(row.get('Name') or '') == FEATURE_NAME:
+                return _install_state_label(row.get('InstallState'))
+        return ''
+    for line in raw.splitlines():
+        label = _install_state_label(line)
+        if label:
+            return label
+    return ''
+
+
+def _cim_feature_state(runner):
+    """dism 读不到时的兜底：WMI 查询同一条可选功能，普通权限就能读。"""
+    cmd = [_powershell_path(), '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+           '-Command', CIM_SCRIPT]
+    result = _call_runner(runner, cmd, CIM_TIMEOUT)
+    out = result.get('stdout', '') or ''
+    text = out + chr(10) + (result.get('stderr', '') or '')
+    state = _parse_install_state(out)
+    if (not state and not out.strip() and not (result.get('stderr') or '').strip()
+            and result.get('returncode', -1) == 0):
+        # 查询没报错但没有这条功能：机器上确实没有这个可选功能（家庭版、精简镜像）。
+        state = 'Absent'
+    return {'state': state, 'returncode': result.get('returncode', -1), 'text': text}
+
+
 def _probe_feature(runner):
     cmd = [DISM, '/online', '/get-featureinfo', '/featurename:' + FEATURE_NAME]
     result = _call_runner(runner, cmd, PROBE_TIMEOUT)
@@ -228,7 +289,14 @@ def _probe_feature(runner):
     state = _parse_feature_state(text)
     if not state and _looks_absent(text, result.get('returncode', -1)):
         state = 'Absent'
-    return {'state': state, 'returncode': result.get('returncode', -1), 'text': text}
+    source = 'dism' if state else ''
+    if not state:
+        cim = _cim_feature_state(runner)
+        text += chr(10) + cim['text']
+        state = cim['state']
+        source = 'cim' if state else ''
+    return {'state': state, 'returncode': result.get('returncode', -1), 'text': text,
+            'source': source}
 
 
 def _result(state, supported, edition, feature, wsb_exe, needs_reboot, reason, message, hint,
@@ -341,9 +409,14 @@ def _detect(runner, registry_reader, last_record):
         next_step = 'enable'
         return _result('absent', True, edition, 'Absent', wsb_exe, needs_reboot, 'feature_absent',
                        message, hint, next_step)
-    # 读不到 DISM 结果（最常见是没提权，dism 直接返回 740）：退回文件探测，但仍标 unknown。
+    # 两条路都读不到（dism 没提权返回 740，WMI 也没给出结果）才落到这里。
     supported = True if supported_edition is None else bool(supported_edition)
-    message = '无法确认 Windows 沙盒功能状态（读取 DISM 需要管理员权限，或系统没有返回结果）'
+    if needs_reboot:
+        # 已经提权跑过 dism 且退出码是 3010：状态读不到只是因为还没重启，别再让用户白点一次“启用”。
+        return _result('unknown', supported, edition, '', wsb_exe, True, 'dism_unavailable',
+                       '已提交启用 Windows 沙盒，正在等重启生效（当前读不到功能状态）',
+                       '重启电脑后再点“我已重启，重新检测”；重启前不需要再点“启用”。', 'enable')
+    message = '无法确认 Windows 沙盒功能状态（DISM 需要管理员权限，WMI 查询也没有给出结果）'
     parts = ['可以照常点“启用 Windows 沙盒”：已启用时 DISM 不会重复安装，只会再确认一次。']
     if not wsb_exe:
         parts.append('另外没找到 WindowsSandbox.exe，可能是家庭版或被精简的系统镜像。')

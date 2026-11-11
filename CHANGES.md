@@ -1,3 +1,16 @@
+## 1.3.112
+
+一键安装根因：`dism /get-featureinfo` 要管理员权限，普通权限只拿到 740，于是「沙盒到底装没装」读不出来。改用 WMI 兜底。
+
+- **问题**：`src/sandbox_provision.py` 只走 `dism /online /get-featureinfo`。这条命令需要管理员权限，普通用户启动的微信机器人进程只会拿到退出码 `740`（`需要提升权限才能运行 DISM`），`_parse_feature_state` 解析不出状态，`_detect` 一路落到最后的兜底分支：`state='unknown'`、`reason='dism_unavailable'`、`next_step='enable'`。实测本机（Win11 26200 专业版，非管理员）**改造前恒为 unknown，而这台机器的沙盒明明是启用状态**。所谓「大部分电脑装不上沙盒」，根因不是装不上，是**读不出装没装**，于是用户被面板引导着重复点「启用」，每点一次弹一次 UAC，看起来就是装不上。
+- **兜底探测**：新增 `_cim_feature_state(runner)`，走 WMI 的同一份状态——`(Get-CimInstance -ClassName Win32_OptionalFeature -Filter 'Name="Containers-DisposableClientVM"').InstallState`。普通权限可读，实测 1.16 秒返回 `1`。
+- **两段式**：`_probe_feature` 仍是 dism 优先（提权环境下它的信息最全），**只有 dism 解析不出状态且没判 Absent 时**才走 WMI；返回值新增 `source`（`'dism'` / `'cim'` / 空串）便于诊断是哪条路给出的结论。
+- **解析不猜**：新增 `_install_state_label`（`1`→Enabled、`2`→Disabled、`3`→Absent，`4` 与任何未知码一律空串）与 `_parse_install_state`（既认裸数字输出，也认 `ConvertTo-Json` 的 dict/list，但 list 里只认同名那条）。
+- **Absent 的判据要苛刻**：stdout 与 stderr **都**为空且退出码为 0，才判 Absent（查询没报错但没这条功能 = 家庭版或精简镜像）。stderr 非空时不判 Absent——PowerShell 的非终止错误退出码也是 0，不能把一条报错当成「系统没这个功能」。
+- **不再闪黑框**：`_default_runner` 补 `creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0)`，与仓库其余外部命令调用一致。
+- **归档重启提示**：`_detect` 的 unknown 兜底先判 `needs_reboot`（已提权跑过 dism 且退出码 3010）：此时告诉用户「已提交启用，正在等重启生效，重启前不需要再点启用」，不再诱导人家白点一次。`reason` 仍是 `dism_unavailable`（`sandbox_provision_api.py:100` 与既有测试依赖这个名字）。
+- **实测对照**：改造后 `_probe_feature(None)` → `{'state': 'Enabled', 'source': 'cim', 'returncode': 740, ...}`，`detect()` → `state='enabled'`、`next_step='launch'`、0.99 秒；同一台机器、同一权限，改造前是 `unknown / dism_unavailable / enable`。
+- 测试：新增 `tests/test_sandbox_provision_1112.py` 35 例（解析、WMI 命令形状、dism 优先且不重复调用、兜底、Absent 三态、`needs_reboot` 分支、`creationflags`）；7 个 sandbox 相关模块一起跑 `Ran 124 tests in 0.321s` / `OK`。
 ## 1.3.111
 
 权限默认强制：把「未声明就记一笔」改成「未声明即拒绝」。
