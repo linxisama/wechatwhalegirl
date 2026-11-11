@@ -1,3 +1,15 @@
+## 1.3.113
+
+沙盒后端能发图片和文件了：内容装进签名文档、整批要么全发要么不发、发完即删。
+
+- **问题**：`SandboxBridge` 的类属性写死 `text_only = True`，`send_files` 是 `not_submitted(...)` 空桩，而 `src/wechat_transports.py:474-477` 的附件闸门只要看到 `text_only` 为真就直接跳过附件——沙盒里发消息于是只剩一行字，图片与表情一律丢弃。
+- **内容走签名文档，不走路径**：`protocol.py` 的模块约定是「不接受代码或任意文件路径」，所以新增 `send_files` 动作，文件字节以 base64 装进签名请求文档；上限 `MAX_SEND_FILES = 6`、`MAX_SEND_FILE_BYTES = 1MB`、`SEND_FILES_BUDGET = 2MB`（base64 后约 2.7MB，仍远小于 `MAX_DOCUMENT_BYTES` 的 4MB，余量留给签名与信封）。
+- **整批要么全发要么不发**：`host_bridge._files_payload` 先把整批读完并校验——空列表、超过数量、读不到、空文件、单份超限、合计超限，任一项不合格就整批返回 ok 为假且什么都不发，不会出现「前两张发出去了、第三张失败」的半批。
+- **「已投递」不能写死 send_text**：`_rpc` 里原本 4 处都用 `action == ` 加引号 send_text 的形式判断（`RpcError` 与 `RpcTimeout` 的 `submitted`、末态 `submitted`、超时后要不要 `_control(cancel)`）。文件请求不走这条判定，一旦超时就会被当成「没投递、可以重试」，结果是同一张图发两遍。改为 `SENDING_ACTIONS` 集合统一判定，send_text 与 send_files 都在其中。
+- **能力协商**：新增 `supports_files()`，读客人端心跳里的 `capabilities` 有没有 `files_v1`，旧客人端直接拒绝并说「隔离后台版本过旧，不支持发送图片或文件，本次未发送」；`status()` 的 `text_only` 也改成按 `capabilities` 推导，不再是常量。
+- **客人端落盘再发送**：`guest_service._send_files` 逐项校验（名字长度、`base64.b64decode(..., validate=True)`、单份与合计上限），解码到 `data/isolated-send/<uuid4>` 目录，调 `self.bridge.send_files`，`finally` 里 `shutil.rmtree` 删掉临时目录——沙盒里不留用户文件。
+- **文案**：`host_bridge._apply_status` 的 `degraded` 与客人端 `_refresh_status` 的 `text_only` 一并改掉，界面不再说「仅支持文字」。
+- 测试：新增 `tests/test_isolated_files_1113.py` 26 例（协议契约 3、`_files_payload` 9、host 侧 `send_files` 8、客人端 6）；`tests/test_isolated_transport1315.py` 的两条旧断言（`text_only` 为真、`send_files` 未提交）改成端到端真发；16 个 isolated 相关模块一起跑 `RESULT tests=239 failures=0 errors=0 skipped=1`，7 个 sandbox 模块 `RESULT tests=124 failures=0 errors=0 skipped=0`。
 ## 1.3.112
 
 一键安装根因：`dism /get-featureinfo` 要管理员权限，普通权限只拿到 740，于是「沙盒到底装没装」读不出来。改用 WMI 兜底。

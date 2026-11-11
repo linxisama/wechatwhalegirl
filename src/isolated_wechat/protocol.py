@@ -15,9 +15,15 @@ VERSION = 1
 MAX_DOCUMENT_BYTES = 4 * 1024 * 1024
 MAX_EVENT_BYTES = 256 * 1024
 DIRECTORIES = ('requests', 'responses', 'consumed', 'events', 'control')
+
+# 一次发送能夹带多少文件：单份与合计数都是硬上限。base64 之后仍要远小于
+# MAX_DOCUMENT_BYTES，签名与信封才留得下余量；超限整批不发，绝不切开发送半批。
+MAX_SEND_FILES = 6
+MAX_SEND_FILE_BYTES = 1024 * 1024
+SEND_FILES_BUDGET = 2 * 1024 * 1024
 ACTIONS = frozenset(('connect', 'disconnect', 'start_listening', 'stop_listening', 'poll',
-                     'inspect_environment', 'send_text', 'display_name', 'resolve_session',
-                     'member_names', 'resolve_chat_name', 'resume_sends',
+                     'inspect_environment', 'send_text', 'send_files', 'display_name',
+                     'resolve_session', 'member_names', 'resolve_chat_name', 'resume_sends',
                      'video_frames'))
 UUID32 = re.compile(r'[0-9a-f]{32}\Z')
 

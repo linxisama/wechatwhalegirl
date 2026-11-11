@@ -30,6 +30,7 @@ class FakeNative:
         self.online = False
         self.listening = False
         self.sends = []
+        self.files = []
         self.cancelled = 0
         self.resumed = 0
         self.configured_account = ''
@@ -48,6 +49,11 @@ class FakeNative:
     def resume_sends(self): self.resumed+=1
     def send_text(self, target, text, name, at):
         self.sends.append((target,text,name,at))
+        return SendOutcome(True,'已提交',{'submission_state':'confirmed','send_key':True,'delivery_verified':False})
+    def send_files(self, target, paths, name, as_image=False):
+        # 内容在客人端临时目录被删前取一份，用来证明整条链路字节未变。
+        self.files.append((target,[Path(item).name for item in paths],name,as_image,
+                           [Path(item).read_bytes() for item in paths]))
         return SendOutcome(True,'已提交',{'submission_state':'confirmed','send_key':True,'delivery_verified':False})
     def inspect_send_environment(self, who): return dict(self.send_environment, target_checked=who)
     def display_name(self, text): return {'wxid_friend':'朋友'}.get(text,text)
@@ -282,7 +288,7 @@ class HostIntegrationTests(ChannelCase):
         service,host=self.start_pair()
         self.assertTrue(host.connect()[0])
         self.assertEqual(host.backend,'sandbox')
-        self.assertTrue(host.text_only)
+        self.assertFalse(host.text_only)
         host.resume_sends()
         received=[]
         self.assertTrue(host.start_listening(received.append)[0])
@@ -297,7 +303,21 @@ class HostIntegrationTests(ChannelCase):
         self.assertEqual(len(service.bridge.sends),1)
         self.assertEqual(host.display_name('wxid_friend'),'朋友')
         self.assertEqual(host.resolve_session('朋友'),'wxid_friend')
-        self.assertEqual(host.send_files('wxid_friend',['image.png']).diagnostic['submission_state'],'not_submitted')
+        missing=host.send_files('wxid_friend',['不存在的图片.png'])
+        self.assertFalse(missing[0])
+        self.assertEqual(missing.diagnostic['submission_state'],'not_submitted')
+        attachment=self.root/'发送图片.png'
+        attachment.write_bytes(b'\x89PNG\r\n\x1a\n'+b'0'*32)
+        sent=host.send_files('wxid_friend',[str(attachment)],'朋友',True)
+        self.assertTrue(sent[0])
+        self.assertEqual(sent.diagnostic['submission_state'],'confirmed')
+        self.assertEqual(len(service.bridge.files),1)
+        target,names,name,as_image,contents=service.bridge.files[0]
+        self.assertEqual((target,name,as_image),('wxid_friend','朋友',True))
+        self.assertEqual(len(names),1)
+        self.assertEqual(contents,[attachment.read_bytes()])
+        # 客人端中转目录发完即删：沙盒磁盘要留给微信自己。
+        self.assertEqual(list((self.root/'guest-profile'/'data'/'isolated-send').glob('*')),[])
         host.disconnect()
         self.assertIsNone(host._relay)
 

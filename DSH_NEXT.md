@@ -1,7 +1,7 @@
-# DSH_NEXT — 鲸鱼娘微信控制台 1.3.111 交接
+# DSH_NEXT — 鲸鱼娘微信控制台 1.3.113 交接
 
 仓库：D:\聊天机器人\微信机器人（**不是** D:\微信机器人）。
-HEAD：见 `git log -1`，工作树 clean。当前版本 `1.3.112`。
+HEAD：见 `git log -1`，工作树 clean。当前版本 `1.3.113`。
 
 ## 本轮已交付（1.3.90 → 1.3.93，10 个提交）
 | 提交 | 内容 |
@@ -37,6 +37,7 @@ HEAD：见 `git log -1`，工作树 clean。当前版本 `1.3.112`。
 | （1.3.110） | 接线：`src/agent_diary.py` 的 `generate()` 写完 SQLite 与 .md 后再 `write_daily` 到 `data/personas/<persona>/memory/daily/`（三条路径独立，任一失败不影响其余）；新增 `DiaryWriter.rollup()` / `keywords()`，`tick()` 顺手做周清月清，`data/personas/.last-rollup` 记「日期:人格名」保证每天最多一次，压缩失败返回 `{'ok':False,'reason':...}` 不抛；`src/plugins/conversation_memory.py` 的 `on_pre_ai` 新增 `_mood_hint` 注入心情（挂在它而不是退役的 emotion_state），新增 `moodEnabled` / `moodOwnerOnly` / `moodIdleHours` 三个配置，重置后立刻落盘，全程 try/except 不外泄 |
 | （1.3.111） | 权限默认强制：`src/wechat_app.py` 的 `self.permission_enforce` 由 `False` 改为 `True`，兑现「未声明即拒绝」。翻之前逐个扫过 `src/plugins/` 下所有真正做危险动作的插件（context_chime / image_library / image_understanding / sticker_steal / web_context / web_lookup），声明全部齐全；`plugin-packs/` 的种子包 `plugin.py` 只是薄封装不含危险调用。未声明时抛 `PermissionDenied` 由 `protected()` 记故障并跳过该插件本轮，不影响整条消息链 |
 | （1.3.112） | 一键安装根因：`dism /get-featureinfo` 需管理员权限，普通用户只拿到 740，`_detect` 落 unknown 并诱导反复点「启用」。新增 `_cim_feature_state`（WMI `Win32_OptionalFeature` 的 `InstallState`，普通权限可读，实测 1.16s 返回 1）作 `_probe_feature` 的第二条路：dism 优先，仅在其解析不出状态且未判 Absent 时调用，返回值新增 `source`；`_install_state_label` / `_parse_install_state`（1→Enabled / 2→Disabled / 3→Absent，认裸数字与 `ConvertTo-Json`）；stdout 与 stderr 都空且 rc=0 才判 Absent；`_default_runner` 补 `CREATE_NO_WINDOW`；`_detect` 的 unknown 兜底先判 `needs_reboot`（3010 已提权跑过）不再让用户白点启用 |
+| （1.3.113） | 沙盒后端可发图片/文件：`protocol.py` 新增 `send_files` 动作与三个上限（6 个 / 单份 1MB / 合计 2MB），文件字节以 base64 装进签名文档；`host_bridge._files_payload` 整批校验（任一不合格整批不发）；`SENDING_ACTIONS` 改掉 4 处写死的 send_text 判定（否则文件超时会被当成未投递而重发）；`supports_files()` 按客人端 `capabilities` 的 `files_v1` 协商，`text_only` 改为按 capabilities 推导；`guest_service._send_files` 解码到 `data/isolated-send/<uuid>` 后 `finally` 删目录；新增 `tests/test_isolated_files_1113.py` 26 例 |
 
 1.3.101 全量回归：`Ran 4472 tests`（三片 1369 + 1525 + 1578，547.1s，`FAILED (failures=2, skipped=5)`），两例均为 `tests/test_cross_machine_paths151.py` 长路径（本机 TEMP 仅 33 字符，历史上一直失败，单独跑该模块稳定复现 `FAILED (failures=2)`）。
 
@@ -81,6 +82,7 @@ subprocess.run([r'D:\聊天机器人\微信机器人\.venv-wechat\Scripts\python
 - 1.3.101 本批测试：`tests.test_json_body_1401` 单独 `Ran 6 tests` / `OK`；与 `test_bad_json_1400`、`test_connection_management_fixes`、`test_plugin_market_routes`、`test_persona_import_152`、`test_wechat_app_flow`、`test_install_guard1351`、`test_plugin_installer` 一起 `Ran 185 tests in 64.012s` / `OK`；全量回归 `Ran 4472 tests`（三片 1369 + 1525 + 1578，547.1s），唯二非通过项为 `tests/test_cross_machine_paths151.py` 长路径（未打包、未跑 selfcheck）。
 - 1.3.102 本批测试：`tests.test_atomic_state1402` 单独 `Ran 6 tests in 0.594s` / `OK`；与 `test_plugin_installer`、`test_plugin_market_routes`、`test_web_context`、`test_plugin_guardrails147`、`test_install_guard1351` 一起 `Ran 139 tests in 31.103s` / `OK`；全量回归 `Ran 4478 tests`（三片 1536 + 1391 + 1551，739.3s），唯二非通过项为 `tests/test_cross_machine_paths151.py` 长路径（环境依赖，与本批无关；未打包、未跑 selfcheck）。
 - **清理教训（1.3.103 实测）**：`.tmp-*` 通配删除前必须 `git grep` 一下文件名在 `tests/` 与 `src/` 里的引用。`.gitignore` 里的 `.tmp-*` 只代表「不纳入版本控制」，不代表「可以随便删」——`.tmp-ink192.png` / `.tmp-ink-191.png` / `.tmp-ink-190b.png` 就是 `tests/test_title_template190.py` 的真机夹具，被删后 20 例 ERROR，且 git 无记录、回收站为空、全盘无同名文件，**不可恢复**。该模块现已改为夹具缺失时显式 skip（`require_fixture()`），14 例 skip、7 例合成图用例照常跑。
+- 1.3.113 本批测试：`tests.test_isolated_files_1113` 单独 `Ran 26 tests` / `OK`；与 `test_isolated_transport1315`、`test_bridge_send_epoch1317`、`test_isolated_status_snapshot1337`、`test_guest_receive_health1334`、`test_guest_watch_lease1316`、`test_inbound_audit1317`、`test_isolated_request_mirror1326`、`test_listener_generation1334`、`test_listener_health1334`、`test_listener_slow_machine1351`、`test_poll_resilience1340`、`test_request_shared_publish1331`、`test_protocol_shared_read1319`、`test_send_timing1343`、`test_wechat_safety` 共 16 个 isolated 相关模块一起跑 `Ran 239 tests in 17.850s` / `OK (skipped=1)`；7 个 sandbox 模块 `Ran 124 tests in 0.549s` / `OK`。注意：必须用仓库自带的 `.venv-wechat`，本机另外两个 python 分别缺 `loguru`（Python312）与 `cryptography` / `httpx` / `PIL`（agent-reach）。
 - 1.3.112 本批测试：`tests.test_sandbox_provision_1112` 单独 `Ran 35 tests` / `OK`；与 `test_sandbox_provision165`、`test_sandbox_doctor_179`、`test_sandbox_doctor_180`、`test_sandbox_win10_176`、`test_sandbox_recovery_ui_api1319`、`test_sandbox_win10_182` 一起 `Ran 124 tests in 0.321s` / `OK`。
 - 1.3.111 本批测试：8 个相关模块一起 `Ran 179 tests in 25.898s` / `OK`；全量回归 `Ran 4649 tests`（三片 1527 + 1649 + 1473，skipped=22），唯二非通过项为 `tests/test_cross_machine_paths151.py` 长路径（环境依赖）。
 - 1.3.110 本批测试：`tests.test_persona_wiring_1110` 单独 `Ran 15 tests in 0.538s` / `OK`；10 个依赖 conversation_memory 的模块一起 `Ran 210 tests in 68.722s` / `OK`；全量回归 `Ran 4649 tests`（三片 1527 + 1649 + 1473，skipped=22），唯二非通过项为 `tests/test_cross_machine_paths151.py` 长路径（本机 TEMP 仅 33 字符，环境依赖）。

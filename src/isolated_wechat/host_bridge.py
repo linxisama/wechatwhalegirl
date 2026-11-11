@@ -1,6 +1,7 @@
 """宿主微信桥替身：只经配对目录访问客体，保留宿主模型/记忆/策略。"""
 from __future__ import annotations
 
+import base64
 import json
 import hashlib
 import logging
@@ -13,8 +14,9 @@ from ..logging_setup import RUNTIME_LOGGER_NAME
 from ..runtime_identity import APP_VERSION
 from ..send_outcome import SendOutcome, not_submitted
 from ..wechat_bridge import WeChatBridge
-from .protocol import (ProtocolError, checked_path, live_service, load_pairing,
-                       read_document, request_digest, write_document)
+from .protocol import (MAX_SEND_FILE_BYTES, MAX_SEND_FILES, SEND_FILES_BUDGET, ProtocolError,
+                       checked_path, live_service, load_pairing, read_document, request_digest,
+                       write_document)
 from .request_slots import publish_request_mirror
 
 
@@ -30,6 +32,12 @@ POLL_TIMEOUT_BUDGET = 60.0
 # 客体侧抽帧要解码整段视频再回传三帧 base64，比轮询慢得多，但仍远小于发送时限。
 VIDEO_FRAME_TIMEOUT = 20.0
 
+# 发送类动作共用的失效语义：旧任务不能再投递，没人接手时还要尝试撤回。
+SENDING_ACTIONS = frozenset(('send_text', 'send_files'))
+
+# 客体要把 base64 落成临时文件再交给微信，比纯文字慢；仍受协议 30 秒期限约束。
+SEND_FILES_TIMEOUT = 24.0
+
 
 # 客人端随响应带回的耗时键（缺键即不打印，老客人端不带 timings 也照常工作）。
 SEND_TIMING_KEYS = ('total', 'receive', 'agent', 'gui_ready', 'press', 'confirm', 'write')
@@ -43,6 +51,34 @@ LISTEN_ATTEMPT_TIMEOUT = 5.0
 LISTEN_PREPARE_BUDGET = 12.0
 LISTEN_ATTEMPTS = 2
 
+
+def _files_payload(paths, as_image):
+    """把待发文件读成 base64：整批一起校验，任一项不合格就整批不发。"""
+    items = [str(item or '') for item in list(paths or ())]
+    if not items:
+        return {'ok': False, 'message': '没有要发送的图片或文件，本次未发送'}
+    if len(items) > MAX_SEND_FILES:
+        return {'ok': False, 'message': f'一次最多发送 {MAX_SEND_FILES} 个图片或文件，本次未发送'}
+    total, files = 0, []
+    for raw in items:
+        source = Path(raw)
+        try:
+            data = source.read_bytes()
+        except OSError:
+            return {'ok': False, 'message': '图片或文件读取失败，本次未发送：' + (source.name or '未知文件')}
+        if not data:
+            return {'ok': False, 'message': '图片或文件是空的，本次未发送：' + source.name}
+        if len(data) > MAX_SEND_FILE_BYTES:
+            return {'ok': False,
+                    'message': f'单个图片或文件必须在 {MAX_SEND_FILE_BYTES >> 20}MB 以内，'
+                               f'本次未发送：{source.name}'}
+        total += len(data)
+        if total > SEND_FILES_BUDGET:
+            return {'ok': False,
+                    'message': f'图片或文件合计超过 {SEND_FILES_BUDGET >> 20}MB，本次未发送'}
+        files.append({'name': source.name[:120], 'image': bool(as_image),
+                      'data': base64.b64encode(data).decode('ascii')})
+    return {'ok': True, 'files': files}
 
 class RpcError(RuntimeError):
     def __init__(self, message, *, submitted=False, diagnostic=None):
@@ -62,7 +98,9 @@ class RpcTimeout(RpcError):
 
 
 class SandboxBridge(WeChatBridge):
-    text_only = True
+    # 1.3.113 起通道能送图片/文件了（send_files + 客体 files_v1 能力），
+    # 不再是「只发文字」的替身；旧客人端由 send_files 的能力预检拦下。
+    text_only = False
 
     def __init__(self, data_dir, channel_dir, note=None, **kwargs):
         super().__init__(data_dir=data_dir, backend='auto', note=note)
@@ -116,10 +154,10 @@ class SandboxBridge(WeChatBridge):
         self.last_error = str(status.get('error') or '')
         if type(status.get('consecutive_fail')) is int and status['consecutive_fail'] >= 0:
             self.consecutive_fail = status['consecutive_fail']
-        self.degraded = '隔离后台仅支持当前已打开会话的文字回复'
+        self.degraded = '隔离后台仅支持当前已打开会话的消息回复'
 
     def _rpc(self, action, args=None, *, timeout=5, send_epoch=None):
-        sending = action == 'send_text'
+        sending = action in SENDING_ACTIONS
         if sending and send_epoch is None:
             send_epoch = getattr(self, '_send_epoch', 0)
         def current_send():
@@ -199,7 +237,7 @@ class SandboxBridge(WeChatBridge):
                                    diagnostic=value.get('diagnostic'))
                 completed = True
                 return value
-            raise RpcTimeout('隔离请求超时，本次不重试', submitted=action == 'send_text')
+            raise RpcTimeout('隔离请求超时，本次不重试', submitted=sending)
         except RpcError:
             raise
         except (OSError, ProtocolError, ValueError) as error:
@@ -207,9 +245,9 @@ class SandboxBridge(WeChatBridge):
             # 不能把「客体协议错误」藏进轮询重试里。
             kind = RpcError if isinstance(error, ProtocolError) else RpcTimeout
             raise kind('隔离通道不可用（' + type(error).__name__ + '）',
-                       submitted=posted and action == 'send_text') from None
+                       submitted=posted and sending) from None
         finally:
-            if posted and not completed and action == 'send_text':
+            if posted and not completed and sending:
                 with self._lock:
                     if current_send():
                         self._control('cancel')
@@ -614,8 +652,54 @@ class SandboxBridge(WeChatBridge):
             self.last_send_at = time.time()
             return outcome
 
+    def supports_files(self):
+        """客人端是否声明 files_v1：旧代理没这一行就不发，免得整批落空。"""
+        try:
+            capabilities = self._service()[1].get('capabilities')
+        except (OSError, ProtocolError):
+            return False
+        return isinstance(capabilities, list) and 'files_v1' in capabilities
+
     def send_files(self, target, paths, target_name='', as_image=False):
-        return not_submitted('隔离后台本轮仅支持文字，图片或文件未发送')
+        """经隔离通道发图片/文件：内容随签名请求送进沙盒，再由客体用微信发出去。"""
+        epoch = getattr(self, '_send_epoch', 0)
+        if getattr(self, '_sends_stopped', False):
+            return not_submitted('隔离发送已停止，本次未发送')
+        from ..wechat_safety import SafetyHold, service_target
+        if (service_target({'target': target})
+                or SafetyHold(self.data_dir.parent / 'wechat_safety_hold.json').status().get('active')):
+            return not_submitted('官方/系统账号或安全暂停，隔离通道未发送')
+        if not self.online:
+            return not_submitted('隔离微信未连接，图片或文件未发送')
+        if not self.supports_files():
+            return not_submitted('隔离后台版本过旧，不支持发送图片或文件，本次未发送')
+        payload = _files_payload(paths, as_image)
+        if not payload['ok']:
+            return not_submitted(str(payload.get('message')))
+        with self._send_lock:
+            if epoch != getattr(self, '_send_epoch', 0) or getattr(self, '_sends_stopped', False):
+                return not_submitted('旧隔离发送任务已停止，本次未发送')
+            try:
+                value = self._rpc('send_files', {'target': str(target), 'files': payload['files'],
+                    'target_name': str(target_name or ''), 'as_image': bool(as_image)},
+                    timeout=SEND_FILES_TIMEOUT, send_epoch=epoch)
+                self._log_send_timings(value.get('timings'))
+                self._apply_status(value.get('status'))
+                outcome = SendOutcome(bool(value.get('ok')), str(value.get('message') or '隔离发送未完成'),
+                                      value.get('diagnostic') or {})
+            except RpcError as error:
+                outcome = SendOutcome(False, str(error), error.diagnostic)
+                if (not isinstance(error, RpcBusy)
+                        and error.diagnostic.get('submission_state') != 'not_submitted'):
+                    self.consecutive_fail += 1
+            if outcome[0]:
+                self.send_ok += 1
+                self.consecutive_fail = 0
+            else:
+                self.send_fail += 1
+                self.last_error = outcome[1]
+            self.last_send_at = time.time()
+            return outcome
 
     def download_media(self, chat, local_id, msg_type, shard=''):
         return None
@@ -709,10 +793,12 @@ class SandboxBridge(WeChatBridge):
                         and self._poll_thread is not None and self._poll_thread.is_alive())
 
     def status(self):
+        capabilities = None
         try:
             _, service = self._service()
             available = True
             guest_status = service.get('status') or {}
+            capabilities = service.get('capabilities')
         except (OSError, ProtocolError):
             available, guest_status = False, {}
         with self._event_lock:
@@ -725,7 +811,9 @@ class SandboxBridge(WeChatBridge):
                              send_code='isolated_unavailable', send_reason='隔离代理未运行或会话已过期')
             listening = bool(value['online'] and self.is_receiving())
             value.update(backend='sandbox', native_backend=str(self._remote_status.get('backend') or ''),
-                         execution_environment='sandbox', current_chat_only=True, text_only=True,
+                         execution_environment='sandbox', current_chat_only=True,
+                         # 只有客人端真的声明了 files_v1 才算能送文件；旧代理照旧只发文字。
+                         text_only=not (isinstance(capabilities, list) and 'files_v1' in capabilities),
                          isolated_agent_available=available, guest_safety=guest_status.get('safety', {}),
                          scope='current_open_chat', listening=listening,
                          read_state='listening' if listening else 'connected' if value['online'] else 'disconnected')

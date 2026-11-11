@@ -1,9 +1,12 @@
 """沙盒内的串行收发代理：不运行模型、不启动微信、不自动切会话。"""
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import os
+import re
+import shutil
 import threading
 import time
 import uuid
@@ -12,8 +15,9 @@ from pathlib import Path
 from ..runtime_identity import APP_VERSION
 from ..wechat_bridge import WeChatBridge
 from ..wechat_safety import SafetyHold, security_notice
-from .protocol import (ACTIONS, MAX_DOCUMENT_BYTES, MAX_EVENT_BYTES, UUID32, ProtocolError,
-                       checked_path, load_pairing, read_document, request_digest, signed, validate_control,
+from .protocol import (ACTIONS, MAX_DOCUMENT_BYTES, MAX_EVENT_BYTES, MAX_SEND_FILE_BYTES,
+                       MAX_SEND_FILES, SEND_FILES_BUDGET, UUID32, ProtocolError, checked_path,
+                       load_pairing, read_document, request_digest, signed, validate_control,
                        validate_request, write_document)
 
 MAX_EVENTS = 500
@@ -36,6 +40,14 @@ SEND_TIMING_KEYS = ('total', 'receive', 'agent', 'gui_ready', 'press', 'confirm'
 
 # 回执是单个 JSON 文档（上限 4MB）：三帧 base64 画面还要给签名与信封留余量。
 FRAME_PAYLOAD_BUDGET = MAX_DOCUMENT_BYTES - 256 * 1024
+
+_FILE_NAME_BAD = re.compile(r'[\\/:*?"<>|\x00-\x1f]')
+
+
+def _safe_file_name(name):
+    """客人端落盘用的文件名：去掉 Windows 不认的字符，绝不带出任何路径。"""
+    value = _FILE_NAME_BAD.sub('_', str(name or '')).strip(' .')
+    return value[:100] or 'file'
 
 
 def _frames_size(frames) -> int:
@@ -105,7 +117,7 @@ class GuestService:
 
     def _refresh_status(self):
         value = dict(self.bridge.status())
-        value.update(execution_environment='sandbox', scope='current_open_chat', text_only=True,
+        value.update(execution_environment='sandbox', scope='current_open_chat', text_only=False,
                      safety=SafetyHold(self.data_root / 'data/wechat_safety_hold.json').status())
         if self._overflow:
             value.update(online=False, error='隔离入站队列已满，已停止收发；请停止并重新配对检查记录')
@@ -119,7 +131,7 @@ class GuestService:
                        {'epoch': self.epoch, 'app_version': APP_VERSION, 'active': bool(active),
                         'program_key': self.program_key,
                         'heartbeat': time.time(), 'status': status,
-                        'capabilities': ['current_chat_text', 'request_mirror_v1']})
+                        'capabilities': ['current_chat_text', 'files_v1', 'request_mirror_v1']})
 
     def _on_message(self, raw):
         if not isinstance(raw, dict):
@@ -255,6 +267,8 @@ class GuestService:
                     'diagnostic': diagnostic, 'status': self.bridge.status(),
                     'timings': _send_timings(received, started, finished,
                                              diagnostic.get('timings'))}
+        if action == 'send_files':
+            return self._send_files(args)
         if action == 'video_frames':
             # 客体侧抽帧：沙盒后端下不了媒体（宿主 download_media 是 fail-closed 空桩），
             # 视频帧只能由客人端就地解码后随回执送回去。
@@ -309,6 +323,60 @@ class GuestService:
             return {'ok': True, 'value': value}
         raise ProtocolError('隔离动作不受支持')
 
+    def _send_files(self, args):
+        """宿主只送得进 base64：先落成客人端自己的文件，再交给微信发出去。"""
+        received = time.perf_counter()
+        if self._overflow:
+            return {'ok': False, 'message': '隔离入站记录未完整落盘，未发送',
+                    'diagnostic': {'submission_state': 'not_submitted'}}
+        target, name = args.get('target'), args.get('target_name', '')
+        files, as_image = args.get('files'), args.get('as_image') is True
+        if (not isinstance(target, str) or not 1 <= len(target) <= 256
+                or not isinstance(name, str) or len(name) > 256
+                or not isinstance(files, list) or not 1 <= len(files) <= MAX_SEND_FILES):
+            raise ProtocolError('隔离图片或文件发送参数无效')
+        total, decoded = 0, []
+        for item in files:
+            if not isinstance(item, dict):
+                raise ProtocolError('隔离图片或文件发送参数无效')
+            raw_name, encoded = item.get('name', ''), item.get('data')
+            if (not isinstance(raw_name, str) or len(raw_name) > 120
+                    or not isinstance(encoded, str) or not encoded):
+                raise ProtocolError('隔离图片或文件发送参数无效')
+            try:
+                data = base64.b64decode(encoded, validate=True)
+            except (ValueError, TypeError):
+                raise ProtocolError('隔离图片或文件内容无效')
+            if not data or len(data) > MAX_SEND_FILE_BYTES:
+                raise ProtocolError('隔离图片或文件大小无效')
+            total += len(data)
+            if total > SEND_FILES_BUDGET:
+                raise ProtocolError('隔离图片或文件合计超出上限')
+            decoded.append((raw_name, data))
+        folder = self.data_root / 'data' / 'isolated-send' / uuid.uuid4().hex
+        try:
+            folder.mkdir(parents=True, exist_ok=True)
+            paths = []
+            for index, (raw_name, data) in enumerate(decoded):
+                path = folder / f'{index + 1}-{_safe_file_name(raw_name)}'
+                path.write_bytes(data)
+                paths.append(str(path))
+        except OSError:
+            shutil.rmtree(folder, ignore_errors=True)
+            return {'ok': False, 'message': '隔离通道无法暂存图片或文件，本次未发送',
+                    'diagnostic': {'submission_state': 'not_submitted'}}
+        started = time.perf_counter()
+        try:
+            result = self.bridge.send_files(target, paths, name, as_image)
+        finally:
+            # 发完即删：客人端磁盘是要留给微信自己的，不留中转目录。
+            shutil.rmtree(folder, ignore_errors=True)
+        finished = time.perf_counter()
+        diagnostic = dict(getattr(result, 'diagnostic', {}))
+        return {'ok': bool(result[0]), 'message': str(result[1]),
+                'diagnostic': diagnostic, 'status': self.bridge.status(),
+                'timings': _send_timings(received, started, finished,
+                                         diagnostic.get('timings'))}
     def _request_now(self):
         # 已过期身份不能在墙钟回拨后重新变成有效请求。
         self._validation_wall = max(self._validation_wall, time.time())
