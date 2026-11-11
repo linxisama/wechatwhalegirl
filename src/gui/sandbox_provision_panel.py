@@ -23,6 +23,13 @@ _STATE_TITLES = {'enabled': '已启用', 'disabled': '未启用', 'absent': '组
                  'unsupported': '不支持', 'unknown': '状态未知', 'failed': '启用失败',
                  'pending_reboot': '等待重启', 'elevation_started': '等待管理员授权'}
 _INITIAL_NOTICE = '正在读取 Windows 沙盒状态…'
+# 等授权/核对结果时自动复查：dism 跑在提权进程里，面板只能靠读日志知道它结束了。
+_POLL_INTERVAL_MS = 2500
+_POLL_WAIT_TICKS = 48  # 还没看到提权日志：48 × 2.5 秒 ≈ 2 分钟（多半是 UAC 没点是）
+_POLL_RUN_TICKS = 120  # 日志已经在长：dism 真在跑，给到 5 分钟
+_POLL_STATES = ('elevation_started', 'pending')
+# check() 的结论不带 next_step，这里补上：成功→去建通道，失败→允许立刻重试。
+_VERDICT_STEPS = {'enabled': 'create_channel', 'failed': 'enable'}
 
 
 class _Bridge(QtCore.QObject):
@@ -40,6 +47,10 @@ class SandboxProvisionPanel(QtWidgets.QWidget):
         self._busy = False
         self._next_step = 'none'
         self._last_status = {}
+        self._poll_ticks = 0
+        self._poll_inflight = False
+        self._poll_state = ''
+        self._poll_seen_log = False
         self._bridge = _Bridge(self)
         self._bridge.done.connect(self._finished)
         self.setObjectName('SandboxProvisionPanel')
@@ -82,6 +93,10 @@ class SandboxProvisionPanel(QtWidgets.QWidget):
         self.log_view.setMinimumHeight(140)
         self.log_view.setMaximumBlockCount(600)
         layout.addWidget(self.log_view, 1)
+
+        self._poll_timer = QtCore.QTimer(self)
+        self._poll_timer.setInterval(_POLL_INTERVAL_MS)
+        self._poll_timer.timeout.connect(self._poll_tick)
 
         self._sync_buttons('none')
         if autostart:
@@ -135,6 +150,7 @@ class SandboxProvisionPanel(QtWidgets.QWidget):
             detail.append('下一步：' + hint)
         self.detail_label.setText(chr(10).join(part for part in detail if part))
         self._sync_buttons(step)
+        self._sync_poll(state)
         return value
 
     def _sync_buttons(self, step):
@@ -151,6 +167,70 @@ class SandboxProvisionPanel(QtWidgets.QWidget):
         stamp = time.strftime('%H:%M:%S')
         for line in str(text or '').splitlines() or ['']:
             self.log_view.appendPlainText('[' + stamp + '] ' + line)
+
+    # ── 自动核对 ──────────────────────────────────────────────────────────
+    def _sync_poll(self, state):
+        """等授权/核对结果时开表；出现结论或不用等就停表。"""
+        if state in _POLL_STATES:
+            self._start_poll()
+        else:
+            self._stop_poll()
+
+    def _start_poll(self):
+        if self._poll_timer.isActive():
+            return
+        self._poll_ticks = 0
+        self._poll_inflight = False
+        self._poll_state = ''
+        self._poll_seen_log = False
+        self._poll_timer.start()
+        self.append_log('等待管理员授权结果，每 2.5 秒自动核对一次…')
+
+    def _stop_poll(self):
+        if self._poll_timer.isActive():
+            self._poll_timer.stop()
+        self._poll_inflight = False
+
+    def _poll_limit(self):
+        """还没看到提权日志（多半是 UAC 没点是）只等 2 分钟；dism 真在跑就给 5 分钟。"""
+        return _POLL_RUN_TICKS if self._poll_seen_log else _POLL_WAIT_TICKS
+
+    def _poll_tick(self):
+        """一次 tick 只读提权日志；不走 _run，免得用户自己的操作被轮询挡住。"""
+        if self._busy or self._poll_inflight:
+            return
+        self._poll_ticks += 1
+        if self._poll_ticks > self._poll_limit():
+            self._stop_poll()
+            self.append_log('自动核对等得够久了，先暂停；还没结果就点「我已重启，重新检测」再试一次。')
+            return
+        self._poll_inflight = True
+        worker = threading.Thread(target=self._work, args=('poll', self.service.check), daemon=True)
+        worker.start()
+
+    def _poll_done(self, result):
+        """pending 静默等下一轮；拿到结论才写日志、渲染并停表。"""
+        self._poll_inflight = False
+        value = self._unwrap(result)
+        state = str(value.get('state') or '')
+        if state == 'pending':
+            if str(value.get('reason') or '') in ('no_result', 'log_unreadable'):
+                self._poll_seen_log = True
+            return
+        if not state:
+            message = str(value.get('message') or '')
+            if message and message != self._poll_state:
+                self._poll_state = message
+                self.append_log(message)
+            return
+        self._stop_poll()
+        if state != self._poll_state:
+            self._poll_state = state
+            self.append_log(str(value.get('message') or '自动核对结束'))
+        merged = dict(value)
+        if not merged.get('next_step'):
+            merged['next_step'] = _VERDICT_STEPS.get(state, 'none')
+        self.apply_status(merged)
 
     # ── 后台线程 ──────────────────────────────────────────────────────────
     def _run(self, name, call):
@@ -188,6 +268,9 @@ class SandboxProvisionPanel(QtWidgets.QWidget):
         return {}
 
     def _finished(self, name, result):
+        if name == 'poll':
+            self._poll_done(result)
+            return
         self._busy = False
         value = self._unwrap(result)
         if name == 'rollback':

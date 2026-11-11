@@ -1,3 +1,15 @@
+## 1.3.114
+
+点完 UAC 不用再手猜时间点「重新检测」：面板在等授权、等结果这段时间每 2.5 秒自己读一次提权日志。
+
+- **问题**：`src/sandbox_provision.py:733` 的 `_write_record` 之后，poll 这一侧其实已经有全部信息（记录里的 `log_path`），但面板不知道有这回事——dism 在提权进程里跑几十秒到几分钟，面板收不到任何回调，用户看到「等待管理员授权」停在那里，只能自己猜什么时候该点「我已重启，重新检测」；点早了读到 `log_missing`，界面还是同一句话。
+- **只读提权日志，不问 status()**：dism 启用功能后要重启才可见，`status()` 在重启前一定读到「已禁用」。所以轮询走 `service.check()`（读 `last-enable.json` 的 `log_path`，再看有没有 `[whale-dism-exit] N` 标记），不走 `status()`；拿到 enabled 结论后也只渲染「已启用」并点亮「创建隔离通道」，不去刷新整页状态，免得把刚生效的功能又显示成未启用。
+- **启停条件**：`apply_status()` 末尾按 state 决定——`elevation_started` / `pending` 开表，其余（enabled / pending_reboot / disabled / failed / unsupported…）一律停表。`pending_reboot` 特意不开：那时该去重启电脑，进程会退出，轮询只会白刷日志。
+- **两段上限**：还没看到提权日志时只等 `_POLL_WAIT_TICKS = 48`（约 2 分钟，正常人都该点完 UAC 了，超时多半是授权窗口被关掉）；一旦日志已经在长（`reason` 为 `no_result` / `log_unreadable`）就放宽到 `_POLL_RUN_TICKS = 120`（5 分钟，给慢机器跑 dism）。到顶停表并写一行「自动核对等得够久了…点『我已重启，重新检测』」，不静默放弃。
+- **不抢用户的操作**：轮询不复用 `_run()`，自己起线程后 `_bridge.done.emit('poll', …)`，所以 `_busy` 始终为假，四个按钮的可用性一秒都不会抖；反过来 `_poll_tick` 发现 `_busy` 或上一轮还没回来就跳过这一拍，不会和用户手动点的核对撞车。
+- **不刷屏**：`pending` 结论完全静默（每 2.5 秒写一行日志比不动更烦），内部异常只在文案变化时写一行，只有拿到 enabled / pending_reboot / failed 才写日志并渲染。
+- **结论补 next_step**：`check()` 的返回不带 `next_step`（那是 `status()` 的字段），面板用 `_VERDICT_STEPS = {'enabled': 'create_channel', 'failed': 'enable'}` 补上，否则按钮不会跟着结论变。
+- 测试：新增 `tests/test_sandbox_panel_poll_1114.py` 15 例（四种状态的启停、开表幂等、busy 与 inflight 跳过、两段上限、不置 busy、pending 静默、pending_reboot/enabled/failed 三种结论渲染、内部异常只记一次）；与 7 个 sandbox 模块一起跑 `RESULT tests=139 failures=0 errors=0 skipped=0`，`tests/test_dialog_thread173` 5 例 `OK`。
 ## 1.3.113
 
 沙盒后端能发图片和文件了：内容装进签名文档、整批要么全发要么不发、发完即删。
